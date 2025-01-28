@@ -156,6 +156,57 @@ int main(int argc, char *argv[])
     auto histoShearZZ = myfun::weightedHistogram(jaczz, volumes, N, minVal, maxVal);
     filename = "histograma_shear_ZZ.dat";
     myfun::guardaWeightedHistograma(histoShearZZ, minVal, maxVal, N, filename);
+
+    //Creamos el histograma 2D de modulo de la velocidad y shear WZ
+    double min1, min2, max1, max2;
+    auto histoVelShearWZ = myfun::twoDHistogram(vels, jacwz, volumes, N, N, min1, max1, min2, max2);
+    filename = "histograma2D_vel_shear_WZ.dat";
+    myfun::guarda2DHistograma(histoVelShearWZ, min1, max1, min2, max2, N, N, filename);
+
+    //Calculamos el shear promedio por velocidad y lo guardamos en un vector
+    //Ademas, renormalizamos el histograma 2D para que cada una de sus filas sea una dist. de prob. condicional (normalizada, por tanto)
+   
+    std::vector<double> shear_given_v(N,0.0), sh_error_given_v(N,0.0), cond_to_v_histo(N*N, 0.0);
+    double sigma;
+
+    for(std::size_t i = 0; i<N; ++i)
+    {
+        double row_sum, row_mean, row_mean2;
+        row_sum = row_mean = row_mean2 = 0.0;
+        for(std::size_t j = 0; j<N; ++j)
+        {
+            sigma = fabs(min2 + (max2-min2)*(static_cast<double>(j)+0.5)/N);
+            row_sum += histoVelShearWZ[i*N+j];
+            row_mean += histoVelShearWZ[i*N+j]*sigma;
+            row_mean2 += histoVelShearWZ[i*N+j]*sigma*sigma;
+            cond_to_v_histo[i*N+j] = histoVelShearWZ[i*N+j];
+        }
+        row_mean/= row_sum;
+        row_mean2/= row_sum;
+        shear_given_v[i] = row_mean;  
+        sh_error_given_v[i] = std::sqrt((row_mean2-row_mean*row_mean)/N);
+        for(std::size_t j = 0; j<N; ++j) cond_to_v_histo[i*N+j]/= row_sum;
+    }
+
+
+    //Guardamos
+
+    filename = "shear_given_v.dat";
+    std::ofstream outFile(filename);
+    if(!outFile.is_open()) 
+    {
+        std::cerr << "Error: No se pudo abrir el archivo " << filename << " para escribir.\n";
+        return 0;
+    }
+    for(std::size_t i = 0; i < N; ++i)
+        outFile << min1 + (max1-min1)*(static_cast<double>(i)+0.5)/N << "\t" << shear_given_v[i] << "\t" << sh_error_given_v[i] << "\n";
+
+    outFile.close();
+    std::cout << "Histograma ponderado guardado en " << filename << "\n";
+
+    filename = "conditioned_2D_histo.dat";
+    myfun::guarda2DHistograma(cond_to_v_histo, min1, max1, min2, max2, N, N, filename);
+
     
     return 0;
     
