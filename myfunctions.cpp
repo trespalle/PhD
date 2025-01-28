@@ -220,4 +220,48 @@ namespace myfun {
         varianza = M2 / static_cast<double>(N - 1);
     }
 
+    void guarda2DHistograma(
+        const std::vector<double>& histogram,
+        double min1,
+        double max1,
+        double min2,
+        double max2,
+        std::size_t numBins1,
+        std::size_t numBins2,
+        const std::string& filename
+    )
+    {
+        //Chequiar el tamano
+        if(histogram.size() != numBins1*numBins2)
+        {
+            std::cerr << "Error: histogram size does not match de number of bins";
+            return;
+        }
+        
+        std::ofstream outFile(filename);
+        if(!outFile.is_open()) 
+        {
+            std::cerr << "Error: No se pudo abrir el archivo " << filename << " para escribir.\n";
+            return;
+        }
+
+        outFile << "# binIndex1\tbinCenter1\tbinIndex2\tbinCenter2\tcount\n";
+
+        for(std::size_t i = 0; i < numBins1; ++i)
+        {
+            double binCenter1 = min1 + (max1 - min1) * ((static_cast<double>(i) + 0.5)/numBins1);
+            for(std::size_t j = 0; j<numBins2; ++j)
+            {
+                double binCenter2 = min2 + (max2 - min2) * ((static_cast<double>(j) + 0.5)/numBins2);
+                outFile << i << "\t" << binCenter1 << "\t" << j << "\t" << binCenter2 << "\t" << histogram[i*numBins2 + j] << "\n";
+            }
+            
+        }
+
+        outFile.close();
+        std::cout << "Histograma 2D ponderado guardado en " << filename << "\n";
+    }
+
+
+
 } // namespace myfun

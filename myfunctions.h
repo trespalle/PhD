@@ -10,6 +10,7 @@
 #include <string>
 #include <fstream> // Para ofstream
 #include <iostream> // Para cerr
+#include <iomanip> //para setprecision
 
 namespace myfun {
 
@@ -66,6 +67,18 @@ namespace myfun {
         const std::vector<double>& data,
         double& media,
         double& varianza
+    );
+
+    //Funcion para guardar un histograma 2D ponderado
+    void guarda2DHistograma(
+        const std::vector<double>& histogram,
+        double min1,
+        double max1,
+        double min2,
+        double max2,
+        std::size_t numBins1,
+        std::size_t numBins2,
+        const std::string& filename
     );
 
 } // namespace myfun
