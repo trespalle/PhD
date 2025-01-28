@@ -85,23 +85,30 @@ int main(int argc, char *argv[])
         double velmag2 = velx2 + vely2; //modulo al cuadrado del campo de velocidades en el centroide de la celda
         double velmag = std::sqrt(velmag2);
 
+        const Foam::tensor& gradUi = gradU()[cellI];
+        double delxx = gradUi.xx();
+        double delxy = gradUi.xy();
+        double delyx = gradUi.yx();
+        double delyy = gradUi.yy();
+
+
 
         double cos2 = velx2/velmag2;
         double sin2 = 1.0 - cos2;
         double sincos = U[cellI].x()*U[cellI].y()/velmag2;
-        double alpha = gradU()[cellI](0,1) + gradU()[cellI](1,0);
-        double beta = gradU()[cellI](1,1) - gradU()[cellI](0,0);
-        double delww = gradU()[cellI](0,0)*cos2 + gradU()[cellI](1,1)*sin2 + alpha*sincos;
-        double delwz = gradU()[cellI](0,1)*cos2 - gradU()[cellI](1,0)*sin2 + beta*sincos;
-        double delzw = gradU()[cellI](1,0)*cos2 - gradU()[cellI](0,1)*sin2 + beta*sincos;
-        double delzz = gradU()[cellI](1,1)*cos2 + gradU()[cellI](0,0)*sin2 - alpha*sincos;
+        double alpha = delxy + delyx;
+        double beta = delyy - delxx;
+        double delww = delxx*cos2 + delyy*sin2 + alpha*sincos;
+        double delwz = delxy*cos2 - delyx*sin2 + beta*sincos;
+        double delzw = delyx*cos2 - delxy*sin2 + beta*sincos;
+        double delzz = delyy*cos2 + delxx*sin2 - alpha*sincos;
 
 
         double volume = mesh.V()[cellI]*1E10;
-        double sigma = gradU()[cellI](0,1);
+
         vels.push_back(velmag);
         volumes.push_back(volume);
-        shearXY.push_back(sigma);
+        shearXY.push_back(delxx);
         jacww.push_back(delww);
         jacwz.push_back(delwz);
         jaczw.push_back(delzw);
