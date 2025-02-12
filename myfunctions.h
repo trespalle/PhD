@@ -81,6 +81,49 @@ namespace myfun {
         const std::string& filename
     );
 
+    std::vector<double> weightedLogHistogram(
+        const std::vector<double>& data,
+        const std::vector<double>& weights,
+        std::size_t numBins,
+        double minValOut, 
+        double maxValOut
+    );
+
+    void guardaWeightedLogHistograma(
+        const std::vector<double>& histogram,
+        double minVal,
+        double maxVal,
+        std::size_t numBins,
+        const std::string& filename
+    );
+
+    std::vector<double> twoDLogHistogram(
+        const std::vector<double>& data1,
+        const std::vector<double>& data2,
+        const std::vector<double>& weights,
+        std::vector<double>& true_means,
+        std::vector<double>& errors,
+        std::size_t numBins1,
+        std::size_t numBins2,
+        double& min1, 
+        double& max1,
+        double& min2,
+        double& max2 
+    );
+
+    void guarda2DLogHistograma(
+        const std::vector<double>& histogram,
+        double min1,
+        double max1,
+        double min2,
+        double max2,
+        std::size_t numBins1,
+        std::size_t numBins2,
+        const std::string& filename
+    );
+    
+
+
 } // namespace myfun
 
 #endif // MYFUNCTIONS_H

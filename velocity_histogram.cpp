@@ -108,11 +108,11 @@ int main(int argc, char *argv[])
 
         vels.push_back(velmag);
         volumes.push_back(volume);
-        shearXY.push_back(delxx);
-        jacww.push_back(delww);
-        jacwz.push_back(delwz);
-        jaczw.push_back(delzw);
-        jaczz.push_back(delzz);
+        shearXY.push_back(std::fabs(delxy));
+        jacww.push_back(std::fabs(delww));
+        jacwz.push_back(std::fabs(delwz));
+        jaczw.push_back(std::fabs(delzw));
+        jaczz.push_back(std::fabs(delzz));
 
         //gradU[cellI](0,1) es la parcial de vx respecto de y (etc)
     }
@@ -122,91 +122,116 @@ int main(int argc, char *argv[])
 
     //Creamos un histograma con N bins
     double minVal, maxVal;
-    std::size_t N = 50;
-    auto histoU = myfun::weightedHistogram(vels, volumes, N, minVal, maxVal);
+    std::size_t N = 40;
+    minVal = *std::min_element(vels.begin(), vels.end());
+    minVal = 1.0e-7;
+    maxVal = *std::max_element(vels.begin(), vels.end());
+    std::cout << "max y min son " << minVal <<" "<< maxVal << std::endl;
+    auto histoU = myfun::weightedLogHistogram(vels, volumes, N, minVal, maxVal);
 
     
     //Guardamos resultados en un fichero
-    std::string filename = "histograma_U.dat";
-    myfun::guardaWeightedHistograma(histoU, minVal, maxVal, N, filename);
+    std::string filename = "histograma_U.dat";/*
+    myfun::guardaWeightedLogHistograma(histoU, minVal, maxVal, N, filename);*/
 
 
-    //Hacemos lo mismo con los volumenes y shears:
-    auto histoVol = myfun::weightedHistogram(volumes, volumes, N, minVal, maxVal);
+    /*//Hacemos lo mismo con los volumenes y shears:
+    auto histoVol = myfun::weightedLogHistogram(volumes, volumes, N, minVal, maxVal);
     filename = "histograma_Vol.dat";
-    myfun::guardaWeightedHistograma(histoVol, minVal, maxVal, N, filename);
+    myfun::guardaWeightedLogHistograma(histoVol, minVal, maxVal, N, filename);
 
 
-    auto histoShearXY = myfun::weightedHistogram(shearXY, volumes, N, minVal, maxVal);
+    auto histoShearXY = myfun::weightedLogHistogram(shearXY, volumes, N, minVal, maxVal);
     filename = "histograma_shear_XY.dat";
-    myfun::guardaWeightedHistograma(histoShearXY, minVal, maxVal, N, filename);
+    myfun::guardaWeightedLogHistograma(histoShearXY, minVal, maxVal, N, filename);
 
-    auto histoShearWW = myfun::weightedHistogram(jacww, volumes, N, minVal, maxVal);
+    auto histoShearWW = myfun::weightedLogHistogram(jacww, volumes, N, minVal, maxVal);
     filename = "histograma_shear_WW.dat";
-    myfun::guardaWeightedHistograma(histoShearWW, minVal, maxVal, N, filename);
+    myfun::guardaWeightedLogHistograma(histoShearWW, minVal, maxVal, N, filename);
 
-    auto histoShearWZ = myfun::weightedHistogram(jacwz, volumes, N, minVal, maxVal);
+    auto histoShearWZ = myfun::weightedLogHistogram(jacwz, volumes, N, minVal, maxVal);
     filename = "histograma_shear_WZ.dat";
-    myfun::guardaWeightedHistograma(histoShearWZ, minVal, maxVal, N, filename);
+    myfun::guardaWeightedLogHistograma(histoShearWZ, minVal, maxVal, N, filename);
 
-    auto histoShearZW = myfun::weightedHistogram(jaczw, volumes, N, minVal, maxVal);
+    auto histoShearZW = myfun::weightedLogHistogram(jaczw, volumes, N, minVal, maxVal);
     filename = "histograma_shear_ZW.dat";
-    myfun::guardaWeightedHistograma(histoShearZW, minVal, maxVal, N, filename);
+    myfun::guardaWeightedLogHistograma(histoShearZW, minVal, maxVal, N, filename);
 
-    auto histoShearZZ = myfun::weightedHistogram(jaczz, volumes, N, minVal, maxVal);
+    auto histoShearZZ = myfun::weightedLogHistogram(jaczz, volumes, N, minVal, maxVal);
     filename = "histograma_shear_ZZ.dat";
-    myfun::guardaWeightedHistograma(histoShearZZ, minVal, maxVal, N, filename);
+    myfun::guardaWeightedLogHistograma(histoShearZZ, minVal, maxVal, N, filename);*/
 
     //Creamos el histograma 2D de modulo de la velocidad y shear WZ
     double min1, min2, max1, max2;
-    auto histoVelShearWZ = myfun::twoDHistogram(vels, jacwz, volumes, N, N, min1, max1, min2, max2);
-    filename = "histograma2D_vel_shear_WZ.dat";
-    myfun::guarda2DHistograma(histoVelShearWZ, min1, max1, min2, max2, N, N, filename);
+    std::vector<double> shear_given_v(N,0.0), sh_error_given_v(N,0.0), true_means(N*N, 0.0), errors(N*N, 0.0);
+    auto histoVelShearWZ = myfun::twoDLogHistogram(vels, jacwz, volumes, true_means, errors, N, N, min1, max1, min2, max2);
+    if(min1*min2==0.0) std::cout<<"liadon historico";
+    std::cout<<"histograma creado\n";
 
     //Calculamos el shear promedio por velocidad y lo guardamos en un vector
-    //Ademas, renormalizamos el histograma 2D para que cada una de sus filas sea una dist. de prob. condicional (normalizada, por tanto)
    
-    std::vector<double> shear_given_v(N,0.0), sh_error_given_v(N,0.0), cond_to_v_histo(N*N, 0.0);
-    double sigma;
+    double v_i, s_i, logfv, logfs, fv, fs;
 
+    v_i = min1;
+    logfv = std::log(max1/min1)/static_cast<double>(N); 
+    logfs = std::log(max2/min2)/static_cast<double>(N);
+    fv = std::exp(logfv);
+    fs = std::exp(logfs);
+    
     for(std::size_t i = 0; i<N; ++i)
     {
+        s_i = min2;
         double row_sum, row_mean, row_mean2;
         row_sum = row_mean = row_mean2 = 0.0;
         for(std::size_t j = 0; j<N; ++j)
         {
-            sigma = fabs(min2 + (max2-min2)*(static_cast<double>(j)+0.5)/N);
             row_sum += histoVelShearWZ[i*N+j];
-            row_mean += histoVelShearWZ[i*N+j]*sigma;
-            row_mean2 += histoVelShearWZ[i*N+j]*sigma*sigma;
-            cond_to_v_histo[i*N+j] = histoVelShearWZ[i*N+j];
+            row_mean += true_means[i*N+j];
+            row_mean2 += errors[i*N+j];
         }
-        row_mean/= row_sum;
-        row_mean2/= row_sum;
-        shear_given_v[i] = row_mean;  
-        sh_error_given_v[i] = std::sqrt((row_mean2-row_mean*row_mean)/N);
-        for(std::size_t j = 0; j<N; ++j) cond_to_v_histo[i*N+j]/= row_sum;
+        if(row_sum!=0.0)
+        {
+            row_mean/= row_sum;
+            row_mean2/= row_sum;
+            shear_given_v[i] = row_mean;  
+            sh_error_given_v[i] = std::sqrt((row_mean2-row_mean*row_mean)/row_sum);
+        }
+        else shear_given_v[i] = sh_error_given_v[i] = 0.0;
+        
+        for(std::size_t j = 0; j<N; ++j) 
+        {
+            if(row_sum!=0.0) histoVelShearWZ[i*N+j]/= (row_sum*v_i*(fv-1.0)*s_i*(fs-1.0));
+            s_i *= fs;
+        }
+        v_i*=fv;
+        
     }
 
 
     //Guardamos
-
-    filename = "shear_given_v.dat";
+    filename = "conditioned_2D_histo.dat";
+    myfun::guarda2DLogHistograma(histoVelShearWZ, min1, max1, min2, max2, N, N, filename);
+    /*filename = "shear_given_v.dat";
     std::ofstream outFile(filename);
     if(!outFile.is_open()) 
     {
         std::cerr << "Error: No se pudo abrir el archivo " << filename << " para escribir.\n";
         return 0;
     }
+    double bincenter, x_i = min1;
+    double logf = std::log(max1/min1)/static_cast<double>(N);
+    double sqf = std::exp(0.5*logf);
     for(std::size_t i = 0; i < N; ++i)
-        outFile << min1 + (max1-min1)*(static_cast<double>(i)+0.5)/N << "\t" << shear_given_v[i] << "\t" << sh_error_given_v[i] << "\n";
-
+    {
+        bincenter = sqf*x_i;
+        outFile << bincenter << "\t" << shear_given_v[i] << "\t" << sh_error_given_v[i] << "\n";
+        x_i = bincenter*sqf;
+    }
+       
     outFile.close();
-    std::cout << "Histograma ponderado guardado en " << filename << "\n";
-
-    filename = "conditioned_2D_histo.dat";
-    myfun::guarda2DHistograma(cond_to_v_histo, min1, max1, min2, max2, N, N, filename);
-
+    std::cout << "Shear given vel ponderado y logaritmico guardado en " << filename << "\n";
+    */
+    
     
     return 0;
     
