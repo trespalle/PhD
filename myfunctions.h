@@ -105,10 +105,10 @@ namespace myfun {
         std::vector<double>& errors,
         std::size_t numBins1,
         std::size_t numBins2,
-        double& min1, 
-        double& max1,
-        double& min2,
-        double& max2 
+        double min1, 
+        double max1,
+        double min2,
+        double max2 
     );
 
     void guarda2DLogHistograma(

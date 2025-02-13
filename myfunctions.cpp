@@ -367,10 +367,10 @@ namespace myfun {
         std::vector<double>& errors,
         std::size_t numBins1,
         std::size_t numBins2,
-        double& min1, 
-        double& max1,
-        double& min2,
-        double& max2 
+        double min1, 
+        double max1,
+        double min2,
+        double max2 
     )
     {
         if(data1.empty()) throw std::runtime_error("twoDHistogram: El vector data1 está vacío!");
@@ -384,15 +384,6 @@ namespace myfun {
         if (numBins1 == 0 || numBins2 == 0) throw std::runtime_error("twoDHistogram: numBins no puede ser 0!");
         std::cout << "numbins1 = " << numBins1 << ", " << "numbins2 = " << numBins2 << "\n";
         
-
-        // Encontrar min y max para ambos conjuntos de datos
-        min1 = *std::min_element(data1.begin(), data1.end());
-        max1 = *std::max_element(data1.begin(), data1.end());
-        min2 = *std::min_element(data2.begin(), data2.end());
-        max2 = *std::max_element(data2.begin(), data2.end());
-
-        min1 = 1.0e-7;
-        min2 = 1.0e-4;
 
         std::cout << "Las velocidades maxima y minima son " << max1 << " y " << min1 << "\n"; 
         std::cout << "Los shears maximo y minimo son " << max2 << " y " << min2 << "\n";
