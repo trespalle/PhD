@@ -43,7 +43,7 @@ int main(int argc, char *argv[])
 
 
     //Forzamos el tiempo a 1047
-    runTime.setTime(1047, 0);
+    runTime.setTime(1032, 0);
 
     //Leemos la velocidad U en la carpeta "1047"
     Foam::volVectorField U
