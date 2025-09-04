@@ -1,0 +1,4 @@
+SOURCE = \
+velocity_histogram.cpp myfunctions.cpp \
+
+# sources

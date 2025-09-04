@@ -43,7 +43,7 @@ int main(int argc, char *argv[])
 
 
     //Forzamos el tiempo a 1047
-    runTime.setTime(1032, 0);
+    runTime.setTime(1047, 0);
 
     //Leemos la velocidad U en la carpeta "1047"
     Foam::volVectorField U
@@ -76,6 +76,9 @@ int main(int argc, char *argv[])
     jacwz.reserve(mesh.nCells());
     jaczw.reserve(mesh.nCells());
     jaczz.reserve(mesh.nCells());
+    double sumVel   = 0.0;
+    double sumShear = 0.0;
+    double totalVol = 0.0;
     
 
     for(Foam::label cellI = 0; cellI<mesh.nCells(); ++cellI)
@@ -113,6 +116,9 @@ int main(int argc, char *argv[])
         jacwz.push_back(std::fabs(delwz));
         jaczw.push_back(std::fabs(delzw));
         jaczz.push_back(std::fabs(delzz));
+        sumVel   += velmag * volume;
+        sumShear += std::fabs(delwz) * volume;
+        totalVol += volume;
 
         //gradU[cellI](0,1) es la parcial de vx respecto de y (etc)
     }
@@ -240,6 +246,23 @@ int main(int argc, char *argv[])
     outFile.close();
     std::cout << "Shear given vel ponderado y logaritmico guardado en " << filename << "\n";
     
+    // Cálculo de promedios globales
+    double avgVel   = (totalVol > 0.0) ? sumVel   / totalVol : 0.0;
+    double avgShear = (totalVol > 0.0) ? sumShear / totalVol : 0.0;
+
+    // Guardar en fichero "averages"
+    {
+        std::ofstream outAvg("averages.dat");
+        if (!outAvg)
+        {
+            std::cerr << "Error: no se pudo abrir 'averages' para escribir.\n";
+            return 1;
+        }
+        outAvg << "# Promedio ponderado por volumen\n";
+        outAvg << "avgVelocity  " << avgVel   << "\n";
+        outAvg << "avgShearWZ   " << avgShear << "\n";
+    }
+    std::cout << "Promedios guardados en 'averages.dat'.\n";
     
     
     return 0;
