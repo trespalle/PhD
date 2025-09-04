@@ -1,0 +1,5 @@
+*
+!.gitignore
+!halfwidths_and_fluxes copy.ipynb
+!random_agregation.ipynb
+!simulador.ipynb

@@ -1,5 +1,0 @@
-$(OBJECTS_DIR)/myfunctions.cpp.dep: \
-myfunctions.cpp \
-myfunctions.h \
-
-#END
