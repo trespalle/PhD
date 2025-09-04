@@ -5,8 +5,11 @@
 !simulador.ipynb
 !Make/
 !Make/*
+!.vscode/
 !.vscode/*
+!comparison_13/
 !comparison_13/*
+!great_MC_integrator/
 !great_MC_integrator/*
 !aperturas.ipynb
 !halfwidths_and_fluxes.ipynb
