@@ -3,3 +3,12 @@
 !halfwidths_and_fluxes copy.ipynb
 !random_agregation.ipynb
 !simulador.ipynb
+!Make/*
+!.vscode/*
+!comparison_13/*
+!great_MC_integrator/*
+!aperturas.ipynb
+!halfwidths_and_fluxes.ipynb
+!myfunctions.cpp
+!myfunctions.h
+!velocity_histogram.cpp
