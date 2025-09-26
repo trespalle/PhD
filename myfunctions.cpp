@@ -16,6 +16,7 @@ namespace myfun {
         // Encontrar min y max
         minValOut = *std::min_element(data.begin(), data.end());
         maxValOut = *std::max_element(data.begin(), data.end());
+        maxValOut = 4.5;
 
         std::vector<std::size_t> histogram(numBins, 0);
 
@@ -31,8 +32,7 @@ namespace myfun {
         {
             double ratio = (val - minValOut)/(maxValOut - minValOut);
             std::size_t binIndex = static_cast<std::size_t>(ratio * numBins);
-            if(binIndex == numBins) binIndex--;
-            histogram[binIndex]++;
+            if(binIndex < numBins) histogram[binIndex]++;
         }
 
         return histogram;
