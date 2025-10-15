@@ -15,11 +15,12 @@
 namespace myfun {
 
     // Función para construir un histograma
-    std::vector<std::size_t> buildHistogram(
-        const std::vector<double>& data,
+    std::vector<double> buildHistogram(
+        std::vector<double>& data,
         std::size_t numBins,
         double& minValOut, 
-        double& maxValOut
+        double& maxValOut,
+        double percentile = 0.99
     );
 
     // Función para construir un histograma ponderado
@@ -46,7 +47,7 @@ namespace myfun {
 
     // Función para guardar un histograma
     void guardaHistograma(
-        const std::vector<std::size_t>& histogram,
+        const std::vector<double>& histogram,
         double minVal,
         double maxVal,
         std::size_t numBins,

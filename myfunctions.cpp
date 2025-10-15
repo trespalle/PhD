@@ -1,24 +1,27 @@
-// myfunctions.cpp
 #include "myfunctions.h"
+#include <algorithm> 
+#include <vector>
 
 namespace myfun {
 
-    std::vector<std::size_t> buildHistogram(
-        const std::vector<double>& data,
-        std::size_t numBins,
-        double& minValOut, 
-        double& maxValOut
-    )
+    std::vector<double> buildHistogram(std::vector<double>& data, std::size_t numBins, double& minValOut, double& maxValOut, double percentile)
     {
-        if(data.empty()) throw std::runtime_error("buildHistogram: El vector de datos está vacío!");
-        if(numBins == 0) throw std::runtime_error("buildHistogram: numBins no puede ser 0!");
+        if(data.empty()) throw std::runtime_error("buildHistogram: Data vector is empty!");
+        if(numBins == 0) throw std::runtime_error("buildHistogram: numBins cannot be 0!");
 
-        // Encontrar min y max
+        // Find min
         minValOut = *std::min_element(data.begin(), data.end());
-        maxValOut = *std::max_element(data.begin(), data.end());
-        maxValOut = 4.5;
+        
+        // Find percentile instead of max:
+        std::size_t percentile_index = static_cast<std::size_t>(data.size() * percentile);
+        std::nth_element(data.begin(), data.begin() + percentile_index, data.end());
+        maxValOut = data[percentile_index]; // This is our new "effective maximum"
+        //The function "nth element" finds the element that would occupy the nth position of the 
+        //vector if the vector was ordered, and it places it there.
+        //It makes the n-th entry of the vector to coincide with the n-th entry of the ordered vector.
 
-        std::vector<std::size_t> histogram(numBins, 0);
+        std::vector<double> histogram(numBins, 0);
+        double effective_data_size = 0.0;
 
         // Evitar división por cero si todos los valores son iguales
         if(minValOut == maxValOut)
@@ -30,10 +33,22 @@ namespace myfun {
         // Llenar el histograma
         for(auto val : data)
         {
-            double ratio = (val - minValOut)/(maxValOut - minValOut);
-            std::size_t binIndex = static_cast<std::size_t>(ratio * numBins);
-            if(binIndex < numBins) histogram[binIndex]++;
+            if (val >= minValOut && val <= maxValOut)
+            {
+                double ratio = (val - minValOut)/(maxValOut - minValOut);
+                std::size_t binIndex = static_cast<std::size_t>(ratio * numBins);
+                if(binIndex == numBins)  binIndex = numBins -1;
+                
+                histogram[binIndex] += 1.0;
+                effective_data_size += 1.0;
+
+            }   
+            
         }
+
+        // Normalización
+        double delta = (maxValOut - minValOut)/numBins;
+        for(auto &bin : histogram) bin /= (effective_data_size * delta);
 
         return histogram;
     }
@@ -142,7 +157,7 @@ namespace myfun {
     }
 
     void guardaHistograma(
-        const std::vector<std::size_t>& histogram,
+        const std::vector<double>& histogram,
         double minVal,
         double maxVal,
         std::size_t numBins,
