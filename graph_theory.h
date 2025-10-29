@@ -9,6 +9,8 @@
 #include <string>
 #include <algorithm>
 #include <cmath>
+#include <sstream>
+#include <stdexcept>
 
 
 struct Node
@@ -16,6 +18,7 @@ struct Node
     double mass = 0.0;
     int state = 0;
     bool is_boundary = false;
+    std::vector<double> coordinates;
     std::vector<std::size_t> outnbrs, innbrs, outlnks, inlnks; ///list of outnbrs and innbrs labels
     std::vector<double> outwgs, inwgs;
 };
@@ -166,6 +169,96 @@ public:
         
     }
 
+    void check_and_renormalize_weights()
+    {
+        std::cout << "Starting K1L check and renormalization..." << std::endl;
+        bool any_node_failed = false;
+        std::size_t N = nodes.size();
+
+        //Loop 1: check, renormalize outwgs, and update links ---
+        for(std::size_t i = 0; i < N; ++i)
+        {
+            // We only care about nodes with outgoing links
+            if(nodes[i].outwgs.empty()) continue; 
+
+            // Calculate the sum of outgoing weights
+            double sum = 0.0;
+            for(double w : nodes[i].outwgs) sum += w;
+
+            
+            // Case 1: Sum is 0 (problematic)
+            if (std::abs(sum) < 1e-10) 
+            {
+                if(!any_node_failed) 
+                { 
+                    // Print header only the first time
+                    std::cerr << "--- K1L WARNINGS (Critical Errors) ---" << std::endl;
+                    any_node_failed = true;
+                }
+                std::cerr << "  ERROR Node " << i << ": Has " << nodes[i].outwgs.size() << " outgoing links, but their weight sum is 0." << " Cannot renormalize! Flows will be incorrect." << std::endl;
+                continue; // We cannot divide by zero, skip this node
+            }
+            
+            // Case 2: Sum is not 1.0 (standard violation)
+            if(std::abs(sum - 1.0) > 1e-9)
+            {
+                if(!any_node_failed) 
+                { 
+                    // Print header only the first time
+                    std::cerr << "--- K1L WARNINGS (Corrections) ---" << std::endl;
+                    any_node_failed = true;
+                }
+                std::cerr << "  Node " << i << ": Weight sum = " << sum << ". Forcing renormalization." << std::endl;
+            }
+
+            // Force renormalization (always, if sum != 0)
+            // This corrects violations from Case 2 and also ensures
+            // nodes that already summed to 1 are unaffected.
+            for(std::size_t j = 0; j < nodes[i].outwgs.size(); ++j)
+            {
+                // 1. Renormalize the outwg of node i
+                nodes[i].outwgs[j] /= sum;
+                
+                // 2. Update the weight in the global links list
+                std::size_t link_idx = nodes[i].outlnks[j];
+                links[link_idx].weight = nodes[i].outwgs[j];
+            }
+        }
+
+        // Loop 2: update in-weights (copied from your logic in fix_disorder) 
+        // This loop ensures that the 'inwgs' of neighbors reflect
+        // the renormalized weights we just calculated.
+        for (std::size_t i = 0; i < N; ++i) 
+        {
+            for (std::size_t j = 0; j < nodes[i].outnbrs.size(); ++j)
+            {
+                auto outnbr  = nodes[i].outnbrs[j];
+                auto outwg   = nodes[i].outwgs[j]; // The already renormalized weight
+                auto& innbrs = nodes[outnbr].innbrs;
+                auto& inwgs = nodes[outnbr].inwgs;
+                
+                // Find 'i' in the 'innbrs' list of 'outnbr'
+                auto pos = std::find(innbrs.begin(), innbrs.end(), i);
+                if (pos != innbrs.end()) 
+                {
+                    std::size_t k = std::size_t(pos - innbrs.begin());
+                    if (k < inwgs.size()) inwgs[k] = outwg;           
+                } 
+                // No 'else' is needed; if not found, it's a graph
+                // consistency error that 'add_link' should prevent.
+            }
+        }
+
+        // Final Message 
+        if (any_node_failed) 
+        {
+            std::cerr << "------------------------------------------" << std::endl;
+            std::cout << "K1L check finished. Violations were found and corrected (or reported)." << std::endl;
+        } 
+        else std::cout << "K1L check passed. All nodes comply." << std::endl;
+    
+    }
+
 
     void update_boundaries()
     {
@@ -189,6 +282,72 @@ public:
                 outlet.push_back(i);
                 nodes[i].is_boundary = true;
             }
+        }
+    }
+
+    void read_coordinates(const std::string& filename)
+    {
+        std::ifstream fin(filename);
+        if (!fin) throw std::runtime_error("Error: could not open coordinate file: " + filename);
+    
+        std::string line;
+        std::size_t node_id;
+        double coord_val;
+        int line_num = 0;
+
+        while (std::getline(fin, line)) 
+        {
+            line_num++;
+            std::stringstream ss(line);
+
+            // Read Node ID
+            if (!(ss >> node_id)) throw std::runtime_error("Error reading node ID from line " + std::to_string(line_num) + " in " + filename);
+            if (node_id >= nodes.size()) throw std::runtime_error("Error: Node ID " + std::to_string(node_id) + " from coordinate file is out of bounds (max is " + std::to_string(nodes.size() - 1) + ").");
+        
+            // Clear previous coordinates and read new ones
+            nodes[node_id].coordinates.clear();
+            while (ss >> coord_val) nodes[node_id].coordinates.push_back(coord_val);
+            
+            if (nodes[node_id].coordinates.empty()) throw std::runtime_error("Error: No coordinates found for node ID " + std::to_string(node_id) + " on line " + std::to_string(line_num) + " in " + filename);
+            
+        }
+        fin.close();
+        std::cout << "Successfully read coordinates for " << nodes.size() << " nodes from " << filename << std::endl;
+    }
+    void check_mass_conservation()
+    {
+        std::cout << "Checking mass conservation for non-outlet nodes..." << std::endl;
+        bool conservation_failed = false;
+
+        for (std::size_t i = 0; i < nodes.size(); ++i)
+        {
+            // Solo nos importan los nodos que no son 'outlets'
+            // (ya que los outlets por definición no tienen salida)
+            if (nodes[i].outnbrs.empty()) continue; 
+
+            double weight_sum = 0.0;
+            for (double w : nodes[i].outwgs)
+            {
+                weight_sum += w;
+            }
+
+            // Comprobamos si la suma se desvía significativamente de 1.0
+            if (std::abs(weight_sum - 1.0) > 1e-9)
+            {
+                std::cerr << "WARNING: Mass not conserved at node " << i << ". "
+                        << "Sum of output weights is: " << weight_sum 
+                        << " (Difference: " << (weight_sum - 1.0) << ")" << std::endl;
+                conservation_failed = true;
+                std::cout << "Outnbrs: " << std::endl;
+                for( auto& v : nodes[i].outnbrs) std::cout << v << " ";
+                std::cout << std::endl;
+
+            }
+        }
+
+        if (!conservation_failed)
+        {
+            std::cout << "Mass conservation check passed for all nodes." << std::endl;
         }
     }
 
@@ -219,7 +378,7 @@ public:
 
             for(std::size_t i = 0; i < active_nodes.size(); ++i) 
             {
-                if(std::abs(new_flows[i] - nodes[active_nodes[i]].mass) > 1e-05)
+                if(std::abs(new_flows[i] - nodes[active_nodes[i]].mass) > 1e-10)
                 {
                     for(std::size_t j = 0; j < nodes[active_nodes[i]].outnbrs.size(); ++j) 
                         new_active_nodes.push_back(nodes[active_nodes[i]].outnbrs[j]);
@@ -255,11 +414,11 @@ public:
         
     }
 
-    Graph(const std::string& file_name) ///this is the constructor
+    Graph(const std::string& file_name, const std::string& coords_filename = "") ///this is the constructor
     {
         //We read the list of links from a file:
         std::ifstream fin(file_name);
-        if(!fin) 
+        if(!fin)
         {
             std::cerr << "Error: could not open file.";
             std::exit(5);
@@ -270,6 +429,22 @@ public:
 
         while(fin >> i >> j >> weight) add_link(i, j, weight);
         fin.close();
+
+        check_and_renormalize_weights();
+
+        // Read node coordinates (if provided)
+        if (!coords_filename.empty()) 
+        {
+            try 
+            {
+                read_coordinates(coords_filename);
+            } 
+            catch (const std::runtime_error& e) 
+            {
+                 // Re-throw or handle more gracefully if needed
+                 throw std::runtime_error("Error during coordinate reading: " + std::string(e.what()));
+            }
+        }
 
         update_boundaries();
         compute_stationary_flows();

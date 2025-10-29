@@ -18,6 +18,7 @@ struct Params
     int nreals = 1;
     int nbins = 50;
     int randomize_flag = 0;
+    std::string coords_file = "";
 };
 
 RNG Rand;
@@ -25,6 +26,434 @@ RNG Rand;
 void fix_disorder(Graph& G);
 Params read_params(int argc, char** argv);
 void initialize_flows(Graph& G);
+void dfs_sum_products( std::size_t current_node_idx, double current_product, const Graph& G_original, const std::vector<bool>& is_big_tube, std::map<size_t, double>& target_weights, std::vector<bool>& visited);
+Graph create_big_tubes_graph(const Graph& G_original);
+void create_output_directory(const std::string& dir_path);
+
+
+// Creates a Gnuplot script to plot simulation vs. analytical data.
+void create_all_plots(const std::string& output_dir, const std::string& base_name_tubes, const std::string& base_name_pores, const std::string& analytical_base_name, double mu, double sigma2) 
+{
+    // Derive the other histogram filenames automatically
+    std::string big_in_tubes_hist_file = "big_in_" + base_name_tubes;
+    std::string big_out_tubes_hist_file = "big_out_" + base_name_tubes;
+    std::string small_in_tubes_hist_file = "small_in_" + base_name_tubes;
+    std::string small_out_tubes_hist_file = "small_out_" + base_name_tubes;
+
+    // SCRIPT 1: The main plot with P(q) and Alim fit 
+    {
+        std::string script_path = output_dir + "tube_flow_dist_plot.gp";
+        std::ofstream gpout(script_path);
+        
+        gpout << "# --- Main Plot: Simulation vs. Full Analytical Fit and Gamma (Alim) Fit ---" << std::endl;
+        gpout << "reset" << std::endl;
+        
+        // Alim Fit parameters (Standard Gamma from moments)
+        gpout << "k_alim = (" << mu << "**2) / " << sigma2 << std::endl;
+        gpout << "theta_alim = " << sigma2 << " / " << mu << std::endl;
+        gpout << "GammaPDF(x) = (1.0/(gamma(k_alim)*theta_alim**k_alim)) * x**(k_alim-1) * exp(-x/theta_alim)" << std::endl;
+        
+        gpout << "set terminal wxt size 900,600 enhanced" << std::endl;
+        gpout << "set title 'Full Distribution vs. Fits'" << std::endl;
+        gpout << "set xlabel 'Flow Rate (q)'" << std::endl;
+        gpout << "set ylabel 'Probability Density'" << std::endl;
+        
+        gpout << "plot '" << base_name_tubes << "' u 2:3 with linespoints title 'All Tubes Data', \\" << std::endl;
+        gpout << "     '" << analytical_base_name << "_P_fit.dat' with lines lw 2 title 'P(q) Analytical Fit', \\" << std::endl;
+        gpout << "     GammaPDF(x) with lines lw 2 dashtype 2 title 'Alim Fit (Gamma PDF)'" << std::endl;
+        gpout.close();
+        std::cout << "Gnuplot script saved to " << script_path << std::endl;
+    }
+
+    // SCRIPT 2: Big tubes vs. f(q)
+    {
+        std::string script_path = output_dir + "big_tube_flow_dist_plot.gp";
+        std::ofstream gpout(script_path);
+
+        gpout << "# --- Big Tubes Plot: Simulation vs. f(q) component ---" << std::endl;
+        gpout << "set xlabel 'Flow rate (q)'" << std::endl;
+        gpout << "set ylabel 'Probability density'" << std::endl;
+
+        gpout << "plot '" << big_in_tubes_hist_file << "' u 2:3 with linespoints title 'Big-in tubes data', \\" << std::endl;
+        gpout << "     '" << big_out_tubes_hist_file << "' u 2:3 with linespoints title 'Big-out tubes data', \\" << std::endl;
+        gpout << "     '" << base_name_pores << "' u 2:3 with linespoints title 'Pore data', \\" << std::endl;
+        gpout << "     '" << analytical_base_name << "_g_fit.dat' with lines lw 2 title 'Model fit'" << std::endl;
+        gpout.close();
+        std::cout << "Gnuplot script saved to " << script_path << std::endl;
+    }
+
+    // SCRIPT 3: Small tubes vs. g(q) 
+    {
+        std::string script_path = output_dir + "small_tube_flow_dist_plot.gp";
+        std::ofstream gpout(script_path);
+
+        gpout << "# Small Tubes Plot: Simulation vs. g(q) component" << std::endl;
+        gpout << "set xlabel 'Flow rate (q)'" << std::endl;
+        gpout << "set ylabel 'Probability density'" << std::endl;
+
+        gpout << "plot '" << small_in_tubes_hist_file << "' u 2:3 with linespoints title 'Small-in tubes data', \\" << std::endl;
+        gpout << "     '" << small_out_tubes_hist_file << "' u 2:3 with linespoints title 'Small-out tubes data', \\" << std::endl;
+        gpout << "     '" << analytical_base_name << "_f_fit.dat' with lines lw 2 title 'Model prediction'" << std::endl;
+        gpout.close();
+        std::cout << "Gnuplot script saved to " << script_path << std::endl;
+    }
+}
+
+void save_inlet_outlet_coordinates(const Graph& G, const std::string& output_dir)
+{
+    // Save Inlet Coordinates
+    std::string inlet_filename = output_dir + "inlet_coordinates.dat";
+    std::ofstream fout_in(inlet_filename);
+    if(!fout_in) std::cerr << "Error: Unable to open file: " << inlet_filename << std::endl;
+    else 
+    {
+        for(std::size_t node_id : G.inlet) 
+        {
+            fout_in << node_id;
+            for (double coord : G.nodes[node_id].coordinates) fout_in << " " << coord;
+            fout_in << std::endl;
+        }
+        fout_in.close();
+        std::cout << "Inlet coordinates saved to " << inlet_filename << std::endl;
+    }
+
+    // Save Outlet Coordinates
+    std::string outlet_filename = output_dir + "outlet_coordinates.dat";
+    std::ofstream fout_out(outlet_filename);
+    if(!fout_out) std::cerr << "Error: Unable to open file: " << outlet_filename << std::endl;
+    else 
+    {
+        for(std::size_t node_id : G.outlet) 
+        {
+            fout_out << node_id;
+            for (double coord : G.nodes[node_id].coordinates) fout_out << " " << coord;
+            fout_out << std::endl;
+        }
+        fout_out.close();
+        std::cout << "Outlet coordinates saved to " << outlet_filename << std::endl;
+    }
+}
+
+int main(int argc, char** argv){
+
+    // Read parameters (number of histogram bins & number of realizations of the network:
+    Params p = read_params(argc, argv);
+    std::cout << "nbins = " << p.nbins << std::endl << "nreals = " << p.nreals << std::endl;
+
+    // Create output directory:
+    const std::string output_dir = "output/";
+    create_output_directory(output_dir);
+
+    // We read the graph from its list of links:
+    Graph G(p.filename, p.coords_file);
+
+    
+    
+    std::size_t ii = 0;
+    for(const auto& node : G.nodes) 
+    {
+        if(!node.is_boundary) if(node.outnbrs.size() + node.innbrs.size() == 2)
+        {
+            std::cout << "Rare bulk node detected: " << std::endl;
+            std::cout << "in-degree = " << node.innbrs.size() << std::endl;
+            std::cout << "out-degree = " << node.outnbrs.size() << std::endl;
+            for(auto weight : node.outwgs) std::cout << weight << " ";
+            std::cout << std::endl;
+        }
+        ++ii;
+    }
+
+
+    // Save boundary coordinates if coordinates were loaded 
+    if (!p.coords_file.empty() && !G.nodes.empty()) 
+        save_inlet_outlet_coordinates(G, output_dir);
+    
+
+    // We print some interesting information about the pore network
+    std::size_t n_bulk = G.nodes.size() - G.inlet.size() - G.outlet.size();
+    std::cout << "Number of inlets = " << G.inlet.size() << ", Number of outlets = " << G.outlet.size() << std::endl;
+    std::cout << "Number of bulk nodes = " << n_bulk << std::endl;
+    std::cout << "Among the bulk nodes there are: " << std::endl;
+    
+
+    std::size_t n_type_1, n_type_2;
+    n_type_1 = n_type_2 = 0;
+    for(auto& junction : G.nodes)
+    {
+        if((junction.outnbrs.size() == 2)&&(junction.innbrs.size() == 1)) 
+        {
+            ++ n_type_2;
+            junction.state = 2;
+        } 
+        
+        if((junction.outnbrs.size() == 1)&&(junction.innbrs.size() == 2))
+        {
+            ++ n_type_1;
+            junction.state = 1;
+        }
+         
+    }
+    std::cout << n_type_1 << "type 1 junctions(merge) " << std::endl;
+    std::cout << n_type_2 << "type 2 junctions(split) " << std::endl;
+    std::cout << n_bulk - n_type_1 - n_type_2 << " others" << std::endl;
+
+    
+    // We compute the stationary flows for p.nreals realizations of the disorder (weights):
+    std::vector<double> mass_series, mass_1_series, mass_2_series;
+    std::vector<double> flow_series, big_in_flow_series, big_out_flow_series, small_in_flow_series, small_out_flow_series; 
+    std::vector<double> histogram(p.nbins);
+    double minflow, maxflow;
+    
+    for(std::size_t e = 0; e < p.nreals; ++e)
+    {
+        
+        initialize_flows(G); 
+        if(p.randomize_flag == 1) fix_disorder(G);
+        // G.check_mass_conservation();
+        G.compute_stationary_flows();
+        
+        //We collect flow-rate data at pores (junctions):
+        for(auto& pore : G.nodes) if(!pore.is_boundary)
+        {
+            mass_series.push_back(pore.mass);
+            if(pore.state == 1) mass_1_series.push_back(pore.mass);
+            if(pore.state == 2) mass_2_series.push_back(pore.mass);
+        }
+        
+        //We collect flow-rate data at tubes:
+        for(auto& tube : G.links) 
+        {
+            if((!G.nodes[tube.in].is_boundary)&&(!G.nodes[tube.out].is_boundary))
+            {
+                double flow = G.nodes[tube.in].mass*tube.weight;
+                flow_series.push_back(flow);
+                if((G.nodes[tube.in].innbrs.size() == 2)) big_in_flow_series.push_back(flow);
+                else small_in_flow_series.push_back(flow);
+                if((G.nodes[tube.out].outnbrs.size() == 2)) big_out_flow_series.push_back(flow);
+                else small_out_flow_series.push_back(flow);  
+            }
+                
+        }         
+    }
+
+    // Calculate the mean and variance of the raw data
+    double flow_mean, flow_variance;
+    myfun::med_var(flow_series, flow_mean, flow_variance);
+    std::cout << "Calculated from data: mean = " << flow_mean << ", variance = " << flow_variance << std::endl;
+
+    // Call Python script to generate the analytical curve
+    std::cout << "Executing Python script to generate analytical fit..." << std::endl; 
+    // Define the full path for the Python output file
+    std::string  analytical_base_path = output_dir + "analytical";
+    // Build the command string with the new argument
+    myfun::med_var(mass_series, flow_mean, flow_variance, 99.5);
+    std::string command = "python calculate_fit.py " + std::to_string(flow_mean) + " " + std::to_string(flow_variance) + " " + analytical_base_path; 
+    // Execute the command
+    int result = system(command.c_str());
+    if (result != 0) 
+        std::cerr << "Warning: Python script may have failed." << std::endl;
+    
+
+    // Compute correspoinding histograms
+    std::string tube_hist_filename = "tube_flow_dist.dat";
+    histogram = myfun::buildHistogram(mass_series, p.nbins, minflow, maxflow);
+    myfun::guardaHistograma(histogram, minflow, maxflow, p.nbins, output_dir + "pore_flow_dist.dat");
+    histogram = myfun::buildHistogram(mass_1_series, p.nbins, minflow, maxflow);
+    myfun::guardaHistograma(histogram, minflow, maxflow, p.nbins, output_dir + "pore_1_flow_dist.dat");
+    histogram = myfun::buildHistogram(mass_2_series, p.nbins, minflow, maxflow);
+    myfun::guardaHistograma(histogram, minflow, maxflow, p.nbins, output_dir + "pore_2_flow_dist.dat");
+    histogram = myfun::buildHistogram(flow_series, p.nbins, minflow, maxflow);
+    myfun::guardaHistograma(histogram, minflow, maxflow, p.nbins, output_dir + tube_hist_filename);
+    histogram = myfun::buildHistogram(big_in_flow_series, p.nbins, minflow, maxflow,0.95);
+    myfun::guardaHistograma(histogram, minflow, maxflow, p.nbins, output_dir + "big_in_tube_flow_dist.dat");
+    histogram = myfun::buildHistogram(big_out_flow_series, p.nbins, minflow, maxflow);
+    myfun::guardaHistograma(histogram, minflow, maxflow, p.nbins, output_dir + "big_out_tube_flow_dist.dat");
+    histogram = myfun::buildHistogram(small_in_flow_series, p.nbins, minflow, maxflow);
+    myfun::guardaHistograma(histogram, minflow, maxflow, p.nbins, output_dir + "small_in_tube_flow_dist.dat");
+    histogram = myfun::buildHistogram(small_out_flow_series, p.nbins, minflow, maxflow);
+    myfun::guardaHistograma(histogram, minflow, maxflow, p.nbins, output_dir + "small_out_tube_flow_dist.dat");
+
+    // Checking mass conservation: we display total inlet mass vs. total outlet mass
+    double inlet_mass, outlet_mass;
+    inlet_mass = outlet_mass = 0.0;
+    for(auto& v : G.inlet) inlet_mass += G.nodes[v].mass;
+    for(auto& v : G.outlet) outlet_mass += G.nodes[v].mass;
+    std::cout << "Total inlet flow = " << inlet_mass << ", Total outlet flow = " << outlet_mass << std::endl;
+    std::cout << "Graph has " << G.inlet.size() << " inlets." << std::endl;
+
+    // Create the Gnuplot script for fitting
+    myfun::med_var(flow_series, flow_mean, flow_variance, 99.5);
+    create_all_plots(output_dir, tube_hist_filename, "pore_flow_dist.dat", "analytical", flow_mean, flow_variance);
+
+    
+    
+    // BIG TUBE ANALYISIS:
+    std::cout << "\nBIG TUBES GRAPH ANALYSIS" << std::endl;
+
+    //Create the big-tube graph
+    Graph G_big = create_big_tubes_graph(G);
+    std::cout << "Big graph has " << G_big.nodes.size() << " nodes and " << G_big.links.size() << " links." << std::endl;
+    std::cout << "Big graph has " << G_big.inlet.size() << " inlets." << std::endl;
+    // Save the structure of the new graph
+    G_big.save_links(output_dir + "big_graph_links.dat");
+
+    // We compute the fractions distribution
+    std::vector<double> fractions;
+    double fracmin, fracmax;
+    for(auto& link : G.links ) fractions.push_back(link.weight);
+    histogram = myfun::buildHistogram(fractions, p.nbins, fracmin, fracmax);
+    myfun::guardaHistograma(histogram, fracmin, fracmax, p.nbins, output_dir + "fractions_dist.dat");
+
+
+
+
+
+
+
+    /* // Again, (just to check consistency) we compute the stationary flows for p.nreals realizations of the disorder (weights):
+    mass_history.clear();
+    flow_history.clear();
+    big_flow_history.clear(); 
+    small_flow_history.clear(); 
+    
+    for(std::size_t e = 0; e < p.nreals; ++e)
+    {
+        
+        //initialize_flows(G_big); 
+        G_big.compute_stationary_flows();
+        
+        //We collect flow-rate data at tubes:
+        for(auto& big_tube : G_big.nodes) if(!big_tube.is_boundary) 
+        {
+            flow_history.push_back(big_tube.mass);
+            big_flow_history.push_back(big_tube.mass);
+        }
+        for(auto& small_tube : G_big.links) 
+        {
+            double flow = G_big.nodes[small_tube.in].mass*small_tube.weight;
+            flow_history.push_back(flow);
+            small_flow_history.push_back(flow);
+        }
+
+        
+    }
+
+    // Compute correspoinding histograms
+    histogram = myfun::buildHistogram(flow_history, p.nbins, minflow, maxflow);
+    myfun::guardaHistograma(histogram, minflow, maxflow, p.nbins, output_dir + "tube_flow_dist_2.dat");
+    histogram = myfun::buildHistogram(big_flow_history, p.nbins, minflow, maxflow);
+    myfun::guardaHistograma(histogram, minflow, maxflow, p.nbins, output_dir + "big_tube_flow_dist_2.dat");
+    histogram = myfun::buildHistogram(small_flow_history, p.nbins, minflow, maxflow);
+    myfun::guardaHistograma(histogram, minflow, maxflow, p.nbins, output_dir + "small_tube_flow_dist_2.dat");
+
+    // Checking mass conservation: we display total inlet mass vs. total outlet mass
+    inlet_mass = outlet_mass = 0.0;
+    for(auto& v : G.inlet) inlet_mass += G.nodes[v].mass;
+    for(auto& v : G.outlet) outlet_mass += G.nodes[v].mass;
+    std::cout << "Total inlet flow = " << inlet_mass << ", Total outlet flow = " << outlet_mass << std::endl;
+ */
+    
+    std::cout << "BIG TUBES GRAPH ANALYSIS FINISHED" << std::endl;
+
+
+    std::cout << "\nAll output files have been saved to the '" << output_dir << "' directory." << std::endl;
+
+    return 0;
+
+}
+
+
+void fix_disorder(Graph& G)
+{
+    std::size_t N = G.nodes.size();
+    
+    //out-weights:
+    for(std::size_t i = 0; i < N; i++)
+    {
+        //if(G.nodes[i].outnbrs.size() > 2) std::cout << "Hola_mundo" << std::endl;
+        if(G.nodes[i].outnbrs.size() == 2)
+        {
+            G.nodes[i].outwgs[0] = Rand();
+            G.nodes[i].outwgs[1] = 1.0 - G.nodes[i].outwgs[0];
+            G.links[G.nodes[i].outlnks[0]].weight =  G.nodes[i].outwgs[0];
+            G.links[G.nodes[i].outlnks[1]].weight =  G.nodes[i].outwgs[1];
+        }
+        if(G.nodes[i].outnbrs.size() == 1)
+        {
+            G.nodes[i].outwgs[0] = 1.0;
+            G.links[G.nodes[i].outlnks[0]].weight =  G.nodes[i].outwgs[0];
+        }
+        
+        if(G.nodes[i].outnbrs.size()>2) 
+        {
+            double wgssum = 0.0;
+            for(auto& weight : G.nodes[i].outwgs)
+            {
+                weight = Rand();
+                wgssum += weight;
+            }
+            for(std::size_t j = 0; j < G.nodes[i].outnbrs.size(); ++j)
+            {
+                G.nodes[i].outwgs[j] /= wgssum;
+                G.links[G.nodes[i].outlnks[j]].weight =  G.nodes[i].outwgs[j];   
+            }   
+
+        }
+        
+             
+    }
+
+    //in-weights:
+    for (std::size_t i = 0; i < N; ++i) for (std::size_t j = 0; j < G.nodes[i].outnbrs.size(); ++j)
+    {
+        auto outnbr  = G.nodes[i].outnbrs[j];
+        auto outwg   = G.nodes[i].outwgs[j];
+        auto& innbrs = G.nodes[outnbr].innbrs;
+        auto& inwgs = G.nodes[outnbr].inwgs;
+        // we find the position of i in innbrs
+        auto pos = std::find(innbrs.begin(), innbrs.end(), i);
+        if (pos != innbrs.end()) 
+        {
+            std::size_t k = std::size_t(pos - innbrs.begin());
+            if (k < inwgs.size()) inwgs[k] = outwg;           
+        } 
+    }
+
+}
+
+Params read_params(int argc, char** argv)
+{
+   Params p;
+
+   if(argc < 2)
+   {
+    std::cerr << "Error: you must provide a filename as the first argument." << std::endl;
+    std::cerr << "Usage: " << argv[0] << " <filename> [n_realizations] [n_bins] [0 for quenched weights, 1 for annealed]" << std::endl;
+    std::exit(1);
+   }
+
+   p.filename = argv[1];
+   if(argc > 2) p.nreals = std::atoi(argv[2]);
+   if(argc > 3) p.nbins = std::atoi(argv[3]);
+   if(argc > 4) p.randomize_flag = std::atoi(argv[4]);
+   if(argc > 5) p.coords_file = argv[5];
+
+   return p;
+}
+
+void initialize_flows( Graph& G)
+{
+    for(auto& v : G.nodes) v.mass = 0.0;
+    double sum = 0.0;
+    for(auto& i : G.inlet) 
+    {
+        double mass = Rand();
+        G.nodes[i].mass = mass;
+        sum += mass;
+    }
+    
+    for(auto& i : G.inlet) G.nodes[i].mass /= sum;
+}
 
 // Recursive helper function for Depth-First Search (DFS)
 void dfs_sum_products( std::size_t current_node_idx, double current_product, const Graph& G_original, const std::vector<bool>& is_big_tube, std::map<size_t, double>& target_weights, std::vector<bool>& visited) 
@@ -150,202 +579,5 @@ void create_output_directory(const std::string& dir_path)
         // Exit the program, as the output directory is essential
         std::exit(1); 
     }
-}
-
-int main(int argc, char** argv){
-
-    // Read parameters (number of histogram bins & number of realizations of the network:
-    Params p = read_params(argc, argv);
-    std::cout << "nbins = " << p.nbins << std::endl << "nreals = " << p.nreals << std::endl;
-
-    // Create output directory:
-    const std::string output_dir = "output/";
-    create_output_directory(output_dir);
-
-    // We read the graph from its list of links:
-    Graph G(p.filename);
-    
-    // We compute the stationary flows for p.nreals realizations of the disorder (weights):
-    std::vector<double> mass_history;
-    std::vector<double> flow_history, big_flow_history, small_flow_history; 
-    std::vector<double> histogram(p.nbins);
-    double minflow, maxflow;
-    
-    for(std::size_t e = 0; e < p.nreals; ++e)
-    {
-        
-        initialize_flows(G); 
-        if(p.randomize_flag == 1) fix_disorder(G);
-        G.compute_stationary_flows();
-        
-        //We collect flow-rate data at pores (junctions):
-        for(auto& pore : G.nodes) if(!pore.is_boundary) mass_history.push_back(pore.mass);
-        //We collect flow-rate data at tubes:
-        for(auto& tube : G.links) 
-        {
-            if((!G.nodes[tube.in].is_boundary)&&(!G.nodes[tube.out].is_boundary))
-            {
-                double flow = G.nodes[tube.in].mass*tube.weight;
-                flow_history.push_back(flow);
-                if(G.nodes[tube.in].innbrs.size() == 2) big_flow_history.push_back(flow);
-                else small_flow_history.push_back(flow);
-                
-            }
-                
-        }         
-    }
-
-    // Compute correspoinding histograms
-    histogram = myfun::buildHistogram(mass_history, p.nbins, minflow, maxflow);
-    myfun::guardaHistograma(histogram, minflow, maxflow, p.nbins, output_dir + "pore_flow_dist.dat");
-    histogram = myfun::buildHistogram(flow_history, p.nbins, minflow, maxflow);
-    myfun::guardaHistograma(histogram, minflow, maxflow, p.nbins, output_dir + "tube_flow_dist.dat");
-    histogram = myfun::buildHistogram(big_flow_history, p.nbins, minflow, maxflow);
-    myfun::guardaHistograma(histogram, minflow, maxflow, p.nbins, output_dir + "big_tube_flow_dist.dat");
-    histogram = myfun::buildHistogram(small_flow_history, p.nbins, minflow, maxflow);
-    myfun::guardaHistograma(histogram, minflow, maxflow, p.nbins, output_dir + "small_tube_flow_dist.dat");
-
-    // Checking mass conservation: we display total inlet mass vs. total outlet mass
-    double inlet_mass, outlet_mass;
-    inlet_mass = outlet_mass = 0.0;
-    for(auto& v : G.inlet) inlet_mass += G.nodes[v].mass;
-    for(auto& v : G.outlet) outlet_mass += G.nodes[v].mass;
-    std::cout << "Total inlet flow = " << inlet_mass << ", Total outlet flow = " << outlet_mass << std::endl;
-    std::cout << "Graph has " << G.inlet.size() << " inlets." << std::endl;
-
-    
-    // BIG TUBE ANALYISIS:
-    std::cout << "\nBIG TUBES GRAPH ANALYSIS" << std::endl;
-
-    //Create the big-tube graph
-    Graph G_big = create_big_tubes_graph(G);
-    std::cout << "Big graph has " << G_big.nodes.size() << " nodes and " << G_big.links.size() << " links." << std::endl;
-    std::cout << "Big graph has " << G_big.inlet.size() << " inlets." << std::endl;
-    // Save the structure of the new graph
-    G_big.save_links(output_dir + "big_graph_links.dat");
-
-
-
-
-    /* // Again, (just to check consistency) we compute the stationary flows for p.nreals realizations of the disorder (weights):
-    mass_history.clear();
-    flow_history.clear();
-    big_flow_history.clear(); 
-    small_flow_history.clear(); 
-    
-    for(std::size_t e = 0; e < p.nreals; ++e)
-    {
-        
-        //initialize_flows(G_big); 
-        G_big.compute_stationary_flows();
-        
-        //We collect flow-rate data at tubes:
-        for(auto& big_tube : G_big.nodes) if(!big_tube.is_boundary) 
-        {
-            flow_history.push_back(big_tube.mass);
-            big_flow_history.push_back(big_tube.mass);
-        }
-        for(auto& small_tube : G_big.links) 
-        {
-            double flow = G_big.nodes[small_tube.in].mass*small_tube.weight;
-            flow_history.push_back(flow);
-            small_flow_history.push_back(flow);
-        }
-
-        
-    }
-
-    // Compute correspoinding histograms
-    histogram = myfun::buildHistogram(flow_history, p.nbins, minflow, maxflow);
-    myfun::guardaHistograma(histogram, minflow, maxflow, p.nbins, output_dir + "tube_flow_dist_2.dat");
-    histogram = myfun::buildHistogram(big_flow_history, p.nbins, minflow, maxflow);
-    myfun::guardaHistograma(histogram, minflow, maxflow, p.nbins, output_dir + "big_tube_flow_dist_2.dat");
-    histogram = myfun::buildHistogram(small_flow_history, p.nbins, minflow, maxflow);
-    myfun::guardaHistograma(histogram, minflow, maxflow, p.nbins, output_dir + "small_tube_flow_dist_2.dat");
-
-    // Checking mass conservation: we display total inlet mass vs. total outlet mass
-    inlet_mass = outlet_mass = 0.0;
-    for(auto& v : G.inlet) inlet_mass += G.nodes[v].mass;
-    for(auto& v : G.outlet) outlet_mass += G.nodes[v].mass;
-    std::cout << "Total inlet flow = " << inlet_mass << ", Total outlet flow = " << outlet_mass << std::endl;
- */
-    
-    std::cout << "BIG TUBES GRAPH ANALYSIS FINISHED" << std::endl;
-
-
-    std::cout << "\nAll output files have been saved to the '" << output_dir << "' directory." << std::endl;
-
-    return 0;
-
-}
-
-
-void fix_disorder(Graph& G)
-{
-    std::size_t N = G.nodes.size();
-    
-    //out-weights:
-    for(std::size_t i = 0; i < N; i++)
-    {
-        //if(G.nodes[i].outnbrs.size() > 2) std::cout << "Hola_mundo" << std::endl;
-        if(G.nodes[i].outnbrs.size() == 2)
-        {
-            G.nodes[i].outwgs[0] = Rand();
-            G.nodes[i].outwgs[1] = 1.0 - G.nodes[i].outwgs[0];
-            G.links[G.nodes[i].outlnks[0]].weight =  G.nodes[i].outwgs[0];
-            G.links[G.nodes[i].outlnks[1]].weight =  G.nodes[i].outwgs[1];
-        }
-    }
-
-    //in-weights:
-    for (std::size_t i = 0; i < N; ++i) for (std::size_t j = 0; j < G.nodes[i].outnbrs.size(); ++j)
-    {
-        auto outnbr  = G.nodes[i].outnbrs[j];
-        auto outwg   = G.nodes[i].outwgs[j];
-        auto& innbrs = G.nodes[outnbr].innbrs;
-        auto& inwgs = G.nodes[outnbr].inwgs;
-        // we find the position of i in innbrs
-        auto pos = std::find(innbrs.begin(), innbrs.end(), i);
-        if (pos != innbrs.end()) 
-        {
-            std::size_t k = std::size_t(pos - innbrs.begin());
-            if (k < inwgs.size()) inwgs[k] = outwg;           
-        } 
-    
-}
-
-}
-
-Params read_params(int argc, char** argv)
-{
-   Params p;
-
-   if(argc < 2)
-   {
-    std::cerr << "Error: you must provide a filename as the first argument." << std::endl;
-    std::cerr << "Usage: " << argv[0] << " <filename> [n_realizations] [n_bins] [0 for quenched weights, 1 for annealed]" << std::endl;
-    std::exit(1);
-   }
-
-   p.filename = argv[1];
-   if(argc > 2) p.nreals = std::atoi(argv[2]);
-   if(argc > 3) p.nbins = std::atoi(argv[3]);
-   if(argc > 4) p.randomize_flag = std::atoi(argv[4]);
-
-   return p;
-}
-
-void initialize_flows( Graph& G)
-{
-    for(auto& v : G.nodes) v.mass = 0.0;
-    double sum = 0.0;
-    for(auto& i : G.inlet) 
-    {
-        double mass = Rand();
-        G.nodes[i].mass = mass;
-        sum += mass;
-    }
-    
-    for(auto& i : G.inlet) G.nodes[i].mass /= sum;
 }
 
