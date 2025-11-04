@@ -19,6 +19,7 @@ struct Params
     int nbins = 50;
     int randomize_flag = 0;
     std::string coords_file = "";
+    int pbc_flag = 0;
 };
 
 RNG Rand;
@@ -148,25 +149,9 @@ int main(int argc, char** argv){
     Graph G(p.filename, p.coords_file);
 
     
-    
-    std::size_t ii = 0;
-    for(const auto& node : G.nodes) 
-    {
-        if(!node.is_boundary) if(node.outnbrs.size() + node.innbrs.size() == 2)
-        {
-            std::cout << "Rare bulk node detected: " << std::endl;
-            std::cout << "in-degree = " << node.innbrs.size() << std::endl;
-            std::cout << "out-degree = " << node.outnbrs.size() << std::endl;
-            for(auto weight : node.outwgs) std::cout << weight << " ";
-            std::cout << std::endl;
-        }
-        ++ii;
-    }
-
 
     // Save boundary coordinates if coordinates were loaded 
-    if (!p.coords_file.empty() && !G.nodes.empty()) 
-        save_inlet_outlet_coordinates(G, output_dir);
+    if (!p.coords_file.empty() && !G.nodes.empty()) save_inlet_outlet_coordinates(G, output_dir);
     
 
     // We print some interesting information about the pore network
@@ -193,9 +178,28 @@ int main(int argc, char** argv){
         }
          
     }
-    std::cout << n_type_1 << "type 1 junctions(merge) " << std::endl;
-    std::cout << n_type_2 << "type 2 junctions(split) " << std::endl;
+    std::cout << n_type_1 << " type 1 junctions(merge) " << std::endl;
+    std::cout << n_type_2 << " type 2 junctions(split) " << std::endl;
     std::cout << n_bulk - n_type_1 - n_type_2 << " others" << std::endl;
+
+    // We compute the degree distribution:
+    std::vector<double> in_degrees, out_degrees;
+    double min_in_degree, max_in_degree, min_out_degree, max_out_degree, delta;
+    for(const auto& node : G.nodes)
+    {
+        in_degrees.push_back(static_cast<double>(node.innbrs.size()));
+        out_degrees.push_back(static_cast<double>(node.outnbrs.size()));
+        // if(node.innbrs.size() != 0) std::cout << static_cast<double>(node.innbrs.size()) << std::endl;
+    }
+    
+    auto degree_histogram = myfun::buildHistogram(in_degrees, p.nbins, min_in_degree, max_in_degree, delta, 1.0);
+    myfun::guardaHistograma(degree_histogram, min_in_degree, delta, output_dir + "in_degree_dist.dat");
+    std::cout << "Max in-degree = " << max_in_degree << std::endl;
+    std::cout << "Min in-degree = " << min_in_degree << std::endl;
+    degree_histogram = myfun::buildHistogram(out_degrees, p.nbins, min_out_degree, max_out_degree, delta, 1.0);
+    myfun::guardaHistograma(degree_histogram, min_out_degree, delta, output_dir + "out_degree_dist.dat");
+    std::cout << "Max out-degree = " << max_out_degree << std::endl;
+    std::cout << "Min out-degree = " << min_out_degree << std::endl;
 
     
     // We compute the stationary flows for p.nreals realizations of the disorder (weights):
@@ -203,6 +207,7 @@ int main(int argc, char** argv){
     std::vector<double> flow_series, big_in_flow_series, big_out_flow_series, small_in_flow_series, small_out_flow_series; 
     std::vector<double> histogram(p.nbins);
     double minflow, maxflow;
+    bool use_pbc = (p.pbc_flag == 1);
     
     for(std::size_t e = 0; e < p.nreals; ++e)
     {
@@ -210,7 +215,7 @@ int main(int argc, char** argv){
         initialize_flows(G); 
         if(p.randomize_flag == 1) fix_disorder(G);
         // G.check_mass_conservation();
-        G.compute_stationary_flows();
+        G.compute_stationary_flows_better(Rand, use_pbc);
         
         //We collect flow-rate data at pores (junctions):
         for(auto& pore : G.nodes) if(!pore.is_boundary)
@@ -238,40 +243,48 @@ int main(int argc, char** argv){
 
     // Calculate the mean and variance of the raw data
     double flow_mean, flow_variance;
-    myfun::med_var(flow_series, flow_mean, flow_variance);
+    // Esta primera llamada era solo para imprimir, pero se sobrescribía
+    myfun::med_var(flow_series, flow_mean, flow_variance); 
     std::cout << "Calculated from data: mean = " << flow_mean << ", variance = " << flow_variance << std::endl;
 
     // Call Python script to generate the analytical curve
     std::cout << "Executing Python script to generate analytical fit..." << std::endl; 
-    // Define the full path for the Python output file
+    
     std::string  analytical_base_path = output_dir + "analytical";
-    // Build the command string with the new argument
-    myfun::med_var(mass_series, flow_mean, flow_variance, 99.5);
+    
+    // --- ¡ESTA ES LA PARTE IMPORTANTE! ---
+    // Aquí calculabas la media y varianza de 'mass_series'
+    myfun::med_var(flow_series, flow_mean, flow_variance, 99.5);
+    
+    // Y aquí se las pasabas a Python
     std::string command = "python calculate_fit.py " + std::to_string(flow_mean) + " " + std::to_string(flow_variance) + " " + analytical_base_path; 
+    
     // Execute the command
     int result = system(command.c_str());
     if (result != 0) 
         std::cerr << "Warning: Python script may have failed." << std::endl;
+   
+
     
 
     // Compute correspoinding histograms
     std::string tube_hist_filename = "tube_flow_dist.dat";
-    histogram = myfun::buildHistogram(mass_series, p.nbins, minflow, maxflow);
-    myfun::guardaHistograma(histogram, minflow, maxflow, p.nbins, output_dir + "pore_flow_dist.dat");
-    histogram = myfun::buildHistogram(mass_1_series, p.nbins, minflow, maxflow);
-    myfun::guardaHistograma(histogram, minflow, maxflow, p.nbins, output_dir + "pore_1_flow_dist.dat");
-    histogram = myfun::buildHistogram(mass_2_series, p.nbins, minflow, maxflow);
-    myfun::guardaHistograma(histogram, minflow, maxflow, p.nbins, output_dir + "pore_2_flow_dist.dat");
-    histogram = myfun::buildHistogram(flow_series, p.nbins, minflow, maxflow);
-    myfun::guardaHistograma(histogram, minflow, maxflow, p.nbins, output_dir + tube_hist_filename);
-    histogram = myfun::buildHistogram(big_in_flow_series, p.nbins, minflow, maxflow,0.95);
-    myfun::guardaHistograma(histogram, minflow, maxflow, p.nbins, output_dir + "big_in_tube_flow_dist.dat");
-    histogram = myfun::buildHistogram(big_out_flow_series, p.nbins, minflow, maxflow);
-    myfun::guardaHistograma(histogram, minflow, maxflow, p.nbins, output_dir + "big_out_tube_flow_dist.dat");
-    histogram = myfun::buildHistogram(small_in_flow_series, p.nbins, minflow, maxflow);
-    myfun::guardaHistograma(histogram, minflow, maxflow, p.nbins, output_dir + "small_in_tube_flow_dist.dat");
-    histogram = myfun::buildHistogram(small_out_flow_series, p.nbins, minflow, maxflow);
-    myfun::guardaHistograma(histogram, minflow, maxflow, p.nbins, output_dir + "small_out_tube_flow_dist.dat");
+    histogram = myfun::buildHistogram(mass_series, p.nbins, minflow, maxflow, delta);
+    myfun::guardaHistograma(histogram, minflow, delta, output_dir + "pore_flow_dist.dat");
+    histogram = myfun::buildHistogram(mass_1_series, p.nbins, minflow, maxflow, delta);
+    myfun::guardaHistograma(histogram, minflow, delta, output_dir + "pore_1_flow_dist.dat");
+    histogram = myfun::buildHistogram(mass_2_series, p.nbins, minflow, maxflow, delta);
+    myfun::guardaHistograma(histogram, minflow, delta, output_dir + "pore_2_flow_dist.dat");
+    histogram = myfun::buildHistogram(flow_series, p.nbins, minflow, maxflow, delta);
+    myfun::guardaHistograma(histogram, minflow, delta, output_dir + tube_hist_filename);
+    histogram = myfun::buildHistogram(big_in_flow_series, p.nbins, minflow, maxflow, delta);
+    myfun::guardaHistograma(histogram, minflow, delta, output_dir + "big_in_tube_flow_dist.dat");
+    histogram = myfun::buildHistogram(big_out_flow_series, p.nbins, minflow, maxflow, delta);
+    myfun::guardaHistograma(histogram, minflow, delta, output_dir + "big_out_tube_flow_dist.dat");
+    histogram = myfun::buildHistogram(small_in_flow_series, p.nbins, minflow, maxflow, delta);
+    myfun::guardaHistograma(histogram, minflow, delta, output_dir + "small_in_tube_flow_dist.dat");
+    histogram = myfun::buildHistogram(small_out_flow_series, p.nbins, minflow, maxflow, delta);
+    myfun::guardaHistograma(histogram, minflow, delta, output_dir + "small_out_tube_flow_dist.dat");
 
     // Checking mass conservation: we display total inlet mass vs. total outlet mass
     double inlet_mass, outlet_mass;
@@ -301,8 +314,8 @@ int main(int argc, char** argv){
     std::vector<double> fractions;
     double fracmin, fracmax;
     for(auto& link : G.links ) fractions.push_back(link.weight);
-    histogram = myfun::buildHistogram(fractions, p.nbins, fracmin, fracmax);
-    myfun::guardaHistograma(histogram, fracmin, fracmax, p.nbins, output_dir + "fractions_dist.dat");
+    histogram = myfun::buildHistogram(fractions, p.nbins, fracmin, fracmax, delta);
+    myfun::guardaHistograma(histogram, fracmin, delta, output_dir + "fractions_dist.dat");
 
 
 
@@ -428,7 +441,13 @@ Params read_params(int argc, char** argv)
    if(argc < 2)
    {
     std::cerr << "Error: you must provide a filename as the first argument." << std::endl;
-    std::cerr << "Usage: " << argv[0] << " <filename> [n_realizations] [n_bins] [0 for quenched weights, 1 for annealed]" << std::endl;
+    std::cerr << "Usage: " << argv[0] << " <filename> [n_realizations] [n_bins] [randomize_flag] [coords_file] [pbc_flag]" << std::endl;
+    std::cerr << "  <filename>       : Path to the links file." << std::endl;
+    std::cerr << "  [n_realizations] : (Default 1) Number of realizations." << std::endl;
+    std::cerr << "  [n_bins]         : (Default 50) Number of histogram bins." << std::endl;
+    std::cerr << "  [randomize_flag] : (Default 0) 0 for quenched, 1 for annealed." << std::endl;
+    std::cerr << "  [coords_file]    : (Default \"\") Path to coordinates file. Use \"\" to skip." << std::endl;
+    std::cerr << "  [pbc_flag]       : (Default 0) 0 for non-PBC, 1 for PBC solver." << std::endl;
     std::exit(1);
    }
 
@@ -437,6 +456,7 @@ Params read_params(int argc, char** argv)
    if(argc > 3) p.nbins = std::atoi(argv[3]);
    if(argc > 4) p.randomize_flag = std::atoi(argv[4]);
    if(argc > 5) p.coords_file = argv[5];
+   if(argc > 6) p.pbc_flag = std::atoi(argv[6]); 
 
    return p;
 }

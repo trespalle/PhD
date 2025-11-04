@@ -1,99 +1,121 @@
 #include "myfunctions.h"
-#include <algorithm> 
 #include <vector>
+#include <stdexcept> 
+#include <algorithm> 
+#include <cstddef>   
+#include <iostream>      
+#include <fstream>       
+#include <string>        
+#include <numeric>       
+#include <limits>      
+#include <cmath>       
 
 namespace myfun {
 
-    std::vector<double> buildHistogram(std::vector<double>& data, std::size_t numBins, double& minValOut, double& maxValOut, double percentile)
+    std::vector<double> buildHistogram(std::vector<double>& data, std::size_t numBins, double& minValOut, double& maxValOut, double& delta, double percentile )
     {
         if(data.empty()) throw std::runtime_error("buildHistogram: Data vector is empty!");
         if(numBins == 0) throw std::runtime_error("buildHistogram: numBins cannot be 0!");
 
-        // Find min
-        minValOut = *std::min_element(data.begin(), data.end());
+        // Sort the vector ONCE
+        // This is the main O(N log N) operation.
+        std::sort(data.begin(), data.end());
+
+        //Get Min and Max (now O(1) operations)
         
-        // Find percentile instead of max:
-        std::size_t percentile_index = static_cast<std::size_t>(data.size() * percentile);
-        std::nth_element(data.begin(), data.begin() + percentile_index, data.end());
-        maxValOut = data[percentile_index]; // This is our new "effective maximum"
-        //The function "nth element" finds the element that would occupy the nth position of the 
-        //vector if the vector was ordered, and it places it there.
-        //It makes the n-th entry of the vector to coincide with the n-th entry of the ordered vector.
-
-        std::vector<double> histogram(numBins, 0);
-        double effective_data_size = 0.0;
-
-        // Evitar división por cero si todos los valores son iguales
-        if(minValOut == maxValOut)
+        // Min is simply the first element
+        minValOut = data.front();
+        
+        // Find the percentile index (with the off-by-one fix)
+        std::size_t percentile_index;
+        if (percentile >= 1.0) percentile_index = data.size() - 1; 
+        else 
         {
-            histogram[0] = data.size();
-            return histogram;
+            if (percentile < 0.0) percentile_index = 0;
+            else percentile_index = static_cast<std::size_t>(data.size() * percentile);
         }
 
-        // Llenar el histograma
-        for(auto val : data)
-        {
-            if (val >= minValOut && val <= maxValOut)
-            {
-                double ratio = (val - minValOut)/(maxValOut - minValOut);
-                std::size_t binIndex = static_cast<std::size_t>(ratio * numBins);
-                if(binIndex == numBins)  binIndex = numBins -1;
-                
-                histogram[binIndex] += 1.0;
-                effective_data_size += 1.0;
+        if (percentile_index >= data.size()) percentile_index = data.size() - 1; // safeguard
+        
+        // Max (for the histogram) is just the element at that index
+        // No nth_element needed!
+        maxValOut = data[percentile_index]; 
+        
+        double range = maxValOut - minValOut;
 
-            }   
+        // Discrete Data Logic (Quantum)
+        // The vector is already sorted, so this is fast (O(N))
+        double quantum = std::numeric_limits<double>::max();
+        if(data.size() > 1) 
+        {
+            for(std::size_t i = 1; i < data.size(); ++i) 
+            {
+                double diff = data[i] - data[i-1];
+                // Check if diff is a real difference and within the histogram range
+                if(diff > 1e-10 && data[i] <= maxValOut) quantum = std::min(quantum, diff);   
+            }
+        }
+        
+        if(quantum == std::numeric_limits<double>::max() || quantum < 1e-10) 
+        {
+             quantum = range / (numBins * 2.0); // Treat as continuous
+             if(quantum < 1e-10) quantum = 1e-10; 
+        }
+
+        // Calculate effective_numbins 
+        std::size_t effective_numbins;
+        double standard_width = range / numBins;
+        
+        if(range < 1e-10) effective_numbins = 1;
+        else 
+        {
+            if(quantum > standard_width) 
+            {
+                // Discrete data case
+                effective_numbins = static_cast<std::size_t>(std::round(range / quantum)) + 1;
+                if (effective_numbins == 0) effective_numbins = 1; 
+                delta = quantum;
+            } 
+            else
+            {
+                effective_numbins = numBins; // continuous data
+                delta = standard_width;
+            }
             
         }
 
-        // Normalización
-        double delta = (maxValOut - minValOut)/numBins;
-        for(auto &bin : histogram) bin /= (effective_data_size * delta);
-
-        return histogram;
-    }
-
-    std::vector<double> weightedHistogram(
-        const std::vector<double>& data,
-        const std::vector<double>& weights,
-        std::size_t numBins,
-        double& minValOut, 
-        double& maxValOut
-    )
-    {
-        if(data.empty()) throw std::runtime_error("weightedHistogram: El vector de datos está vacío!");
-        if(weights.empty()) throw std::runtime_error("weightedHistogram: El vector de pesos está vacío!");
-        if(data.size() != weights.size()) throw std::runtime_error("weightedHistogram: Los vectores de datos y pesos deben tener el mismo tamaño!");
-
-        if(numBins == 0) throw std::runtime_error("weightedHistogram: numBins no puede ser 0!");
-
-        // Encontrar min y max
-        minValOut = *std::min_element(data.begin(), data.end());
-        maxValOut = *std::max_element(data.begin(), data.end());
-
-        std::vector<double> histogram(numBins, 0.0);
-
-        // Evitar división por cero si todos los valores son iguales
-        if(minValOut == maxValOut)
-        {
-            histogram[0] = data.size();
-            return histogram;
+        // Fill Histogram 
+        std::vector<double> histogram(effective_numbins, 0);
+        double effective_data_size = 0.0;
+        
+        if(range < 1e-10) 
+        { 
+            // Handle min == max
+             histogram[0] = data.size();
+             return histogram;
         }
 
-        // Llenar el histograma ponderado
-        for(std::size_t i = 0; i < data.size(); ++i)
+        // We iterate over the 'data' vector (which is now sorted)
+        for(auto val : data)
         {
-            double ratio = (data[i] - minValOut)/(maxValOut - minValOut);
-            std::size_t binIndex = static_cast<std::size_t>(ratio * numBins);
-            if(binIndex == numBins) binIndex--;
-            histogram[binIndex] += weights[i];
+            // Stop iterating once we pass the max value
+            if(val > maxValOut) break;
+
+            if(val >= minValOut) // We know val >= minValOut due to sort
+            {
+                double ratio = (val - minValOut) / range;
+                std::size_t binIndex = static_cast<std::size_t>(ratio * effective_numbins);
+                if(binIndex == effective_numbins)  binIndex = effective_numbins - 1;
+                
+                histogram[binIndex] += 1.0;
+                effective_data_size += 1.0;
+            }   
         }
 
-        // Normalización
-        double delta = (maxValOut - minValOut)/numBins;
-        double suma_weights = 0.0;
-        for(auto w : weights) suma_weights += w;
-        for(auto &bin : histogram) bin /= (suma_weights * delta);
+        // Normalization 
+        double dx = range / effective_numbins;
+        if (effective_data_size > 0 && dx > 0) 
+            for(auto &bin : histogram) bin /= (effective_data_size * dx);
 
         return histogram;
     }
@@ -159,8 +181,7 @@ namespace myfun {
     void guardaHistograma(
         const std::vector<double>& histogram,
         double minVal,
-        double maxVal,
-        std::size_t numBins,
+        double delta,
         const std::string& filename
     )
     {
@@ -175,7 +196,7 @@ namespace myfun {
 
         for(std::size_t i = 0; i < histogram.size(); ++i)
         {
-            double binCenter = minVal + (maxVal - minVal) * ((static_cast<double>(i) + 0.5)/numBins);
+            double binCenter = minVal + delta * ((static_cast<double>(i) + 0.5));
             outFile << i << "\t" << binCenter << "\t" << histogram[i] << "\n";
         }
 
@@ -211,21 +232,31 @@ namespace myfun {
     }
 
     void med_var(
-        const std::vector<double>& data,
-        double& media,
-        double& varianza
-    )
-    {
+    const std::vector<double>& data,
+    double& media,
+    double& varianza,
+    double percentile 
+)
+{
+    // --- Initial sanity checks ---
+    if (data.empty()) {
+        throw std::invalid_argument("med_var: Data vector cannot be empty.");
+    }
+    if (percentile <= 0.0 || percentile > 100.0) {
+        throw std::invalid_argument("med_var: Percentile must be between 0 (exclusive) and 100 (inclusive).");
+    }
+
+    // --- Case 1: Default behavior, use all data (most common and efficient) ---
+    if (percentile == 100.0) {
+        if (data.size() < 2) {
+            throw std::invalid_argument("med_var: At least two elements are required to calculate variance.");
+        }
+        
         double media_acumulada = 0.0;
         double M2 = 0.0;
         std::size_t N = data.size();
 
-        if (N == 0) throw std::invalid_argument("med_var: El vector de datos está vacío.");
-        if (N == 1) throw std::invalid_argument("med_var: Se requiere al menos dos elementos para calcular la varianza.");
-
-        for(std::size_t i = 0; i < N; ++i)
-        {
-            // Algoritmo de Welford para estabilidad numérica
+        for(std::size_t i = 0; i < N; ++i) {
             double delta = data[i] - media_acumulada;
             media_acumulada += delta / static_cast<double>(i + 1);
             M2 += delta * (data[i] - media_acumulada);
@@ -233,7 +264,49 @@ namespace myfun {
 
         media = media_acumulada;
         varianza = M2 / static_cast<double>(N - 1);
+        return; // We are done
     }
+
+    // --- Case 2: Filter data based on the specified percentile ---
+    
+    // 1. Find the value at the given percentile
+    // We must make a copy because nth_element modifies the vector
+    std::vector<double> data_copy = data;
+    std::size_t percentile_index = static_cast<std::size_t>(data.size() * (percentile / 100.0));
+    
+    // Ensure the index is valid
+    if (percentile_index >= data.size()) {
+        percentile_index = data.size() - 1;
+    }
+
+    std::nth_element(data_copy.begin(), data_copy.begin() + percentile_index, data_copy.end());
+    double percentile_value = data_copy[percentile_index];
+
+    // 2. Apply Welford's algorithm only to elements below the percentile value
+    double media_acumulada = 0.0;
+    double M2 = 0.0;
+    std::size_t count = 0; // Count of elements that meet the criteria
+
+    for (const auto& value : data) {
+        if (value < percentile_value) {
+            count++;
+            double delta = value - media_acumulada;
+            media_acumulada += delta / static_cast<double>(count);
+            M2 += delta * (value - media_acumulada);
+        }
+    }
+
+    // 3. Finalize the calculation and check for errors on the filtered set
+    if (count == 0) {
+        throw std::runtime_error("med_var: No data found below the specified percentile. Mean and variance are undefined.");
+    }
+    if (count < 2) {
+        throw std::runtime_error("med_var: Fewer than two data points found below the percentile. Variance is undefined.");
+    }
+
+    media = media_acumulada;
+    varianza = M2 / static_cast<double>(count - 1);
+}
 
     void guarda2DHistograma(
         const std::vector<double>& histogram,

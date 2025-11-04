@@ -20,6 +20,7 @@ namespace myfun {
         std::size_t numBins,
         double& minValOut, 
         double& maxValOut,
+        double& delta,
         double percentile = 0.99
     );
 
@@ -49,8 +50,7 @@ namespace myfun {
     void guardaHistograma(
         const std::vector<double>& histogram,
         double minVal,
-        double maxVal,
-        std::size_t numBins,
+        double delta,
         const std::string& filename
     );
 
@@ -67,7 +67,8 @@ namespace myfun {
     void med_var(
         const std::vector<double>& data,
         double& media,
-        double& varianza
+        double& varianza,
+        double percentile = 100.0
     );
 
     //Funcion para guardar un histograma 2D ponderado
