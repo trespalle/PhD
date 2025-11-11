@@ -11,6 +11,7 @@
 #include <filesystem>
 #include <map>
 #include <functional>
+#include <numeric>
 
 struct Params
 {
@@ -135,6 +136,34 @@ void save_inlet_outlet_coordinates(const Graph& G, const std::string& output_dir
     }
 }
 
+double Pearson_correlation(const std::vector<double>& pair_products, const std::vector<double>& series_1, const std::vector<double>& series_2)
+{
+    double pair_products_mean, trash, mean_1, mean_2, var_1, var_2, covariance;
+    myfun::med_var(series_1, mean_1, var_1);
+    myfun::med_var(series_2, mean_2, var_2);
+    myfun::med_var(pair_products, pair_products_mean, trash);
+
+    covariance = pair_products_mean - mean_1*mean_2;
+    return covariance/std::sqrt(var_1)/std::sqrt(var_2);
+}
+
+void save_k_data(const std::string& filename, const std::vector<std::size_t>& k_values, const std::vector<double>& y_values, const std::vector<double>& y_errors)
+{
+    std::ofstream fout(filename);
+    if(!fout) 
+    {
+        std::cerr << "Error: Unable to open file: " << filename << std::endl;
+        return;
+    }
+
+    fout << "# k\tvalue\tstd_error_of_mean\n";
+    for(std::size_t i = 0; i < k_values.size(); ++i) 
+        fout << k_values[i] << "\t" << y_values[i] << "\t" << y_errors[i] << "\n";
+    
+    fout.close();
+    std::cout << "k-dependent data saved to " << filename << std::endl;
+}
+
 int main(int argc, char** argv){
 
     // Read parameters (number of histogram bins & number of realizations of the network:
@@ -147,6 +176,10 @@ int main(int argc, char** argv){
 
     // We read the graph from its list of links:
     Graph G(p.filename, p.coords_file);
+
+    // Check if the graph is a DAG
+    bool is_dag = G.is_DAG();
+    std::cout << "Graph is a DAG: " << (is_dag ? "true" : "false") << std::endl;
 
     
 
@@ -182,30 +215,212 @@ int main(int argc, char** argv){
     std::cout << n_type_2 << " type 2 junctions(split) " << std::endl;
     std::cout << n_bulk - n_type_1 - n_type_2 << " others" << std::endl;
 
-    // We compute the degree distribution:
+    // We compute the (k=1) degree distribution:
     std::vector<double> in_degrees, out_degrees;
     double min_in_degree, max_in_degree, min_out_degree, max_out_degree, delta;
     for(const auto& node : G.nodes)
     {
         in_degrees.push_back(static_cast<double>(node.innbrs.size()));
         out_degrees.push_back(static_cast<double>(node.outnbrs.size()));
-        // if(node.innbrs.size() != 0) std::cout << static_cast<double>(node.innbrs.size()) << std::endl;
     }
     
     auto degree_histogram = myfun::buildHistogram(in_degrees, p.nbins, min_in_degree, max_in_degree, delta, 1.0);
     myfun::guardaHistograma(degree_histogram, min_in_degree, delta, output_dir + "in_degree_dist.dat");
     std::cout << "Max in-degree = " << max_in_degree << std::endl;
     std::cout << "Min in-degree = " << min_in_degree << std::endl;
+
     degree_histogram = myfun::buildHistogram(out_degrees, p.nbins, min_out_degree, max_out_degree, delta, 1.0);
     myfun::guardaHistograma(degree_histogram, min_out_degree, delta, output_dir + "out_degree_dist.dat");
     std::cout << "Max out-degree = " << max_out_degree << std::endl;
     std::cout << "Min out-degree = " << min_out_degree << std::endl;
 
+
+    // We compute some statistics about order-k neighbours:
+    std::cout << "\n--- STARTING K-ORDER ANALYSIS LOOP ---" << std::endl;
+
+    // Define k values
+    std::vector<std::size_t> k_values;
+    for(std::size_t i = 1; i <= 150; ++i) k_values.push_back(i);
+    std::size_t max_k_for_analysis = *std::max_element(k_values.begin(), k_values.end());
+    
+    // Define summary vectors
+    std::vector<double> k_avg_in_degree, k_avg_out_degree, k_avg_in_degree_err, k_avg_out_degree_err;
+    std::vector<double> k_corr_evenness, k_corr_mass;
+    std::vector<double> k_avg_cum_in_degree, k_avg_cum_out_degree;
+    std::vector<double> k_avg_cum_in_degree_err, k_avg_cum_out_degree_err;
+    
+
+    // Get global 'evenness_values' and 'mass_values' (only need to do this once)
+    std::vector<double> mass_values;
+    std::vector<double> evenness_values; // global population of splitters
+    initialize_flows(G);
+    G.compute_stationary_flows(Rand, (p.pbc_flag == 1)); // Compute flows once
+
+    for(const auto& node : G.nodes) 
+    {
+        mass_values.push_back(node.mass);
+        if(node.outnbrs.size() == 2) 
+        {
+            double evenness = 2.0 * std::min(node.outwgs[0], node.outwgs[1]);
+            evenness_values.push_back(evenness);
+        }
+    }
+
+    // We don't need the global means, but good to have
+    double mass_mean, mass_var, evenness_mean, evenness_var;
+    myfun::med_var(mass_values, mass_mean, mass_var);
+    myfun::med_var(evenness_values, evenness_mean, evenness_var);
+
+    
+    std::vector<std::vector<std::size_t>> out_dist_hist;
+    std::vector<std::vector<std::size_t>> in_dist_hist;
+    G.compute_all_distance_histograms(max_k_for_analysis, out_dist_hist, in_dist_hist);
+    
+
+
+    // Start the loop
+    for(std::size_t k : k_values)
+    {
+        std::cout << "\n--- Analyzing k = " << k << " ---" << std::endl;
+        
+        // Compute the k-th power matrix
+        G.compute_weighted_power(k);
+
+        // Define vectors for this k
+        std::vector<double> k_in_degrees(G.nodes.size(), 0.0);
+        std::vector<double> k_out_degrees(G.nodes.size(), 0.0);
+        std::vector<double> t_fractions;
+        std::vector<double> mass_pair_products, evenness_pair_products;
+        std::vector<double> mass_values_i, mass_values_j;
+        std::vector<double> evenness_values_i, evenness_values_j;
+
+        const double epsilon = 1e-15; // Tolerance for non-zero check
+
+        for(int i = 0; i < G.weights_matrix_powered.outerSize(); ++i) 
+        {
+            for(Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(G.weights_matrix_powered, i); it; ++it)
+            {
+                // Only count entries that are physically significant
+                if (std::abs(it.value()) > epsilon) 
+                {
+                    std::size_t j = it.col();
+                    k_out_degrees[i] += 1.0;
+                    k_in_degrees[j] += 1.0;
+                    t_fractions.push_back(it.value());
+
+                    // Collect pairs for correlation
+                    mass_values_i.push_back(G.nodes[i].mass);
+                    mass_values_j.push_back(G.nodes[j].mass);
+                    mass_pair_products.push_back(G.nodes[i].mass * G.nodes[j].mass);
+                    
+                    if((G.nodes[i].outnbrs.size() == 2) && (G.nodes[j].outnbrs.size() == 2))
+                    {
+                        double evenness_i = 2.0 * std::min(G.nodes[i].outwgs[0], G.nodes[i].outwgs[1]);
+                        double evenness_j = 2.0 * std::min(G.nodes[j].outwgs[0], G.nodes[j].outwgs[1]);
+                        
+                        evenness_values_i.push_back(evenness_i);
+                        evenness_values_j.push_back(evenness_j);
+                        evenness_pair_products.push_back(evenness_i * evenness_j);
+                    }
+                }
+            }
+        } // end of matrix iteration
+
+        // Save distributions for this k 
+        std::string k_suffix = "_k=" + std::to_string(k) + ".dat";
+        double min_val, max_val;
+        
+        auto k_degree_hist = myfun::buildHistogram(k_in_degrees, p.nbins, min_val, max_val, delta);
+        myfun::guardaHistograma(k_degree_hist, min_val, delta, output_dir + "order_k_in_degree" + k_suffix);
+        
+        k_degree_hist = myfun::buildHistogram(k_out_degrees, p.nbins, min_val, max_val, delta);
+        myfun::guardaHistograma(k_degree_hist, min_val, delta, output_dir + "order_k_out_degree" + k_suffix);
+        
+        auto k_t_frac_hist = myfun::buildHistogram(t_fractions, p.nbins, min_val, max_val, delta);
+        myfun::guardaHistograma(k_t_frac_hist, min_val, delta, output_dir + "t_fractions_dist" + k_suffix);
+
+        // Calculate and store summary statistics for this k 
+        double mean, var, sem;
+
+        // In-degree
+        myfun::med_var(k_in_degrees, mean, var);
+        sem = std::sqrt(var/k_in_degrees.size());
+        k_avg_in_degree.push_back(mean);
+        k_avg_in_degree_err.push_back(sem);
+        std::cout << "Avg k-in-degree = " << mean << " +/- " << sem << std::endl;
+
+        // Out-degree
+        myfun::med_var(k_out_degrees, mean, var);
+        sem = std::sqrt(var/k_out_degrees.size());
+        k_avg_out_degree.push_back(mean);
+        k_avg_out_degree_err.push_back(sem);
+        std::cout << "Avg k-out-degree = " << mean << " +/- " << sem << std::endl;
+
+        // Mass correlation
+        double corr_mass = Pearson_correlation(mass_pair_products, mass_values_i, mass_values_j);
+        k_corr_mass.push_back(corr_mass);
+        std::cout << "Mass Correlation = " << corr_mass << std::endl;
+
+        // Evenness Correlation
+        double corr_evenness = Pearson_correlation(evenness_pair_products, evenness_values_i, evenness_values_j);
+        k_corr_evenness.push_back(corr_evenness);
+        std::cout << "Evenness Correlation = " << corr_evenness << std::endl;
+
+        // cumulative distances
+        std::cout << "Computing cumulative degrees for k <= " << k << "..." << std::endl;
+
+        std::vector<double> cum_in_deg_vec, cum_out_deg_vec;
+        cum_in_deg_vec.reserve(G.nodes.size());
+        cum_out_deg_vec.reserve(G.nodes.size());
+
+        for(std::size_t i = 0; i < G.nodes.size(); ++i)
+        {
+            std::size_t cum_out_count = 0;
+            std::size_t cum_in_count = 0;
+            
+            for(std::size_t d = 1; d <= k; ++d) 
+            {
+                cum_out_count += out_dist_hist[i][d];
+                cum_in_count += in_dist_hist[i][d];
+            }
+            cum_out_deg_vec.push_back(static_cast<double>(cum_out_count));
+            cum_in_deg_vec.push_back(static_cast<double>(cum_in_count));
+        }
+
+        // Cumulative In-degree stats
+        myfun::med_var(cum_in_deg_vec, mean, var);
+        sem = std::sqrt(var/cum_in_deg_vec.size());
+        k_avg_cum_in_degree.push_back(mean);
+        k_avg_cum_in_degree_err.push_back(sem);
+
+        // Cumulative Out-degree stats
+        myfun::med_var(cum_out_deg_vec, mean, var);
+        sem = std::sqrt(var/cum_out_deg_vec.size());
+        k_avg_cum_out_degree.push_back(mean);
+        k_avg_cum_out_degree_err.push_back(sem);
+
+    
+    } 
+
+
+    // Save all "vs. k" data 
+    std::cout << "\n--- K-Order Analysis Complete. Saving summary files. ---" << std::endl;
+    
+    
+    // Save summary files using the helper function
+    save_k_data(output_dir + "k_avg_in_degree.dat", k_values, k_avg_in_degree, k_avg_in_degree_err);
+    save_k_data(output_dir + "k_avg_out_degree.dat", k_values, k_avg_out_degree, k_avg_out_degree_err);
+    save_k_data(output_dir + "k_corr_mass.dat", k_values, k_corr_mass, std::vector<double>(k_values.size(), 0.0)); // No error for corr
+    save_k_data(output_dir + "k_corr_evenness.dat", k_values, k_corr_evenness, std::vector<double>(k_values.size(), 0.0)); // No error for corr
+    save_k_data(output_dir + "k_avg_CUM_in_degree.dat", k_values, k_avg_cum_in_degree, k_avg_cum_in_degree_err);
+    save_k_data(output_dir + "k_avg_CUM_out_degree.dat", k_values, k_avg_cum_out_degree, k_avg_cum_out_degree_err);
+
+    
+    
     
     // We compute the stationary flows for p.nreals realizations of the disorder (weights):
     std::vector<double> mass_series, mass_1_series, mass_2_series;
     std::vector<double> flow_series, big_in_flow_series, big_out_flow_series, small_in_flow_series, small_out_flow_series; 
-    std::vector<double> histogram(p.nbins);
     double minflow, maxflow;
     bool use_pbc = (p.pbc_flag == 1);
     
@@ -215,7 +430,7 @@ int main(int argc, char** argv){
         initialize_flows(G); 
         if(p.randomize_flag == 1) fix_disorder(G);
         // G.check_mass_conservation();
-        G.compute_stationary_flows_better(Rand, use_pbc);
+        G.compute_stationary_flows(Rand, use_pbc);
         
         //We collect flow-rate data at pores (junctions):
         for(auto& pore : G.nodes) if(!pore.is_boundary)
@@ -269,7 +484,7 @@ int main(int argc, char** argv){
 
     // Compute correspoinding histograms
     std::string tube_hist_filename = "tube_flow_dist.dat";
-    histogram = myfun::buildHistogram(mass_series, p.nbins, minflow, maxflow, delta);
+    auto histogram = myfun::buildHistogram(mass_series, p.nbins, minflow, maxflow, delta);
     myfun::guardaHistograma(histogram, minflow, delta, output_dir + "pore_flow_dist.dat");
     histogram = myfun::buildHistogram(mass_1_series, p.nbins, minflow, maxflow, delta);
     myfun::guardaHistograma(histogram, minflow, delta, output_dir + "pore_1_flow_dist.dat");
@@ -298,17 +513,6 @@ int main(int argc, char** argv){
     myfun::med_var(flow_series, flow_mean, flow_variance, 99.5);
     create_all_plots(output_dir, tube_hist_filename, "pore_flow_dist.dat", "analytical", flow_mean, flow_variance);
 
-    
-    
-    // BIG TUBE ANALYISIS:
-    std::cout << "\nBIG TUBES GRAPH ANALYSIS" << std::endl;
-
-    //Create the big-tube graph
-    Graph G_big = create_big_tubes_graph(G);
-    std::cout << "Big graph has " << G_big.nodes.size() << " nodes and " << G_big.links.size() << " links." << std::endl;
-    std::cout << "Big graph has " << G_big.inlet.size() << " inlets." << std::endl;
-    // Save the structure of the new graph
-    G_big.save_links(output_dir + "big_graph_links.dat");
 
     // We compute the fractions distribution
     std::vector<double> fractions;
@@ -317,56 +521,6 @@ int main(int argc, char** argv){
     histogram = myfun::buildHistogram(fractions, p.nbins, fracmin, fracmax, delta);
     myfun::guardaHistograma(histogram, fracmin, delta, output_dir + "fractions_dist.dat");
 
-
-
-
-
-
-
-    /* // Again, (just to check consistency) we compute the stationary flows for p.nreals realizations of the disorder (weights):
-    mass_history.clear();
-    flow_history.clear();
-    big_flow_history.clear(); 
-    small_flow_history.clear(); 
-    
-    for(std::size_t e = 0; e < p.nreals; ++e)
-    {
-        
-        //initialize_flows(G_big); 
-        G_big.compute_stationary_flows();
-        
-        //We collect flow-rate data at tubes:
-        for(auto& big_tube : G_big.nodes) if(!big_tube.is_boundary) 
-        {
-            flow_history.push_back(big_tube.mass);
-            big_flow_history.push_back(big_tube.mass);
-        }
-        for(auto& small_tube : G_big.links) 
-        {
-            double flow = G_big.nodes[small_tube.in].mass*small_tube.weight;
-            flow_history.push_back(flow);
-            small_flow_history.push_back(flow);
-        }
-
-        
-    }
-
-    // Compute correspoinding histograms
-    histogram = myfun::buildHistogram(flow_history, p.nbins, minflow, maxflow);
-    myfun::guardaHistograma(histogram, minflow, maxflow, p.nbins, output_dir + "tube_flow_dist_2.dat");
-    histogram = myfun::buildHistogram(big_flow_history, p.nbins, minflow, maxflow);
-    myfun::guardaHistograma(histogram, minflow, maxflow, p.nbins, output_dir + "big_tube_flow_dist_2.dat");
-    histogram = myfun::buildHistogram(small_flow_history, p.nbins, minflow, maxflow);
-    myfun::guardaHistograma(histogram, minflow, maxflow, p.nbins, output_dir + "small_tube_flow_dist_2.dat");
-
-    // Checking mass conservation: we display total inlet mass vs. total outlet mass
-    inlet_mass = outlet_mass = 0.0;
-    for(auto& v : G.inlet) inlet_mass += G.nodes[v].mass;
-    for(auto& v : G.outlet) outlet_mass += G.nodes[v].mass;
-    std::cout << "Total inlet flow = " << inlet_mass << ", Total outlet flow = " << outlet_mass << std::endl;
- */
-    
-    std::cout << "BIG TUBES GRAPH ANALYSIS FINISHED" << std::endl;
 
 
     std::cout << "\nAll output files have been saved to the '" << output_dir << "' directory." << std::endl;

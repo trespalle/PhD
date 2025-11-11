@@ -11,6 +11,13 @@
 #include <cmath>
 #include <sstream>
 #include <stdexcept>
+#include <map>           
+#include <limits>        
+#include "Rand.h"   
+#include <Eigen/Sparse> 
+#include <queue>
+#include <Eigen/Dense>
+
 
 
 struct Node
@@ -21,6 +28,9 @@ struct Node
     std::vector<double> coordinates;
     std::vector<std::size_t> outnbrs, innbrs, outlnks, inlnks; ///list of outnbrs and innbrs labels
     std::vector<double> outwgs, inwgs;
+    std::size_t cumulative_k_out_degree = 0;
+    std::size_t cumulative_k_in_degree = 0;
+    
 };
 
 struct Link
@@ -35,6 +45,14 @@ struct Graph
     std::vector<Node> nodes;
     std::vector<Link> links;
     std::vector<std::size_t> inlet, outlet;
+
+    // PBC requires knowledge of the spatial domain bounds
+    double xmin = 0, xmax = 0, ymin = 0, ymax = 0;
+
+    Eigen::SparseMatrix<double, Eigen::RowMajor> weights_matrix;
+    Eigen::SparseMatrix<double, Eigen::RowMajor> weights_matrix_powered;
+    std::size_t current_k = 1;
+
 
 private:
     std::size_t position(std::size_t guy, const std::vector<std::size_t>& people)
@@ -53,9 +71,206 @@ private:
         my_vector.erase(last, my_vector.end()); ///daraa
     }
 
+    void run_flow_sweep()
+    {
+        std::vector<std::size_t> active_nodes;
+        // First, we define some functions:
+
+        auto initialize_active_nodes = [&]()
+        {
+            if(inlet.empty()) (*this).update_boundaries();
+            if(inlet.empty()) 
+            {
+                std::cerr << "The graph has no inlet nodes. This is problematic." << std::endl;
+                std::exit(1);
+            }
+            
+            for(std::size_t i = 0; i < inlet.size(); ++i) for(std::size_t j = 0; j < nodes[inlet[i]].outnbrs.size(); ++j) 
+                active_nodes.push_back(nodes[inlet[i]].outnbrs[j]);
+
+            erase_duplicates(active_nodes);
+        };
+
+        auto update_active_nodes = [&](const std::vector<double>& new_flows)
+        {
+            std::vector<std::size_t> new_active_nodes;
+
+            for(std::size_t i = 0; i < active_nodes.size(); ++i) 
+            {
+                if(std::abs(new_flows[i] - nodes[active_nodes[i]].mass) > 1e-10)
+                {
+                    for(std::size_t j = 0; j < nodes[active_nodes[i]].outnbrs.size(); ++j) 
+                        new_active_nodes.push_back(nodes[active_nodes[i]].outnbrs[j]);
+                }
+            }
+
+            erase_duplicates(new_active_nodes);
+            for(std::size_t i = 0; i < active_nodes.size(); ++i) nodes[active_nodes[i]].mass = new_flows[i];
+            active_nodes = new_active_nodes;
+        };
+
+
+        auto sweep = [&]()
+        {
+            std::vector<double> new_flows(active_nodes.size(), 0.0);
+            for(std::size_t i = 0; i < active_nodes.size(); ++i)
+            {
+                std::size_t label = active_nodes[i];
+
+                for(std::size_t j = 0; j < nodes[label].innbrs.size(); ++j)
+                {
+                    std::size_t innbr = nodes[label].innbrs[j];
+                    new_flows[i] += nodes[label].inwgs[j]*nodes[innbr].mass;
+                }    
+            }
+            update_active_nodes(new_flows);
+        };
+
+        // Now, the core of the function itself:
+        initialize_active_nodes();
+        while(!active_nodes.empty()) sweep();
+    }
+
+    // The following private method finds the min/max X and Y coordinates from all nodes. Necessary for PBC distance calculations.
+     
+    void update_domain_bounds()
+    {
+        if(nodes.empty()) return;
+
+        bool first_node_found = false;
+        // Find the first node with valid coordinates to initialize
+        for(const auto& node : nodes) 
+        {
+            if(!node.coordinates.empty() && node.coordinates.size() >= 2) 
+            {
+                xmin = xmax = node.coordinates[0];
+                ymin = ymax = node.coordinates[1];
+                first_node_found = true;
+                break;
+            }
+        }
+
+        if(!first_node_found) 
+        {
+             std::cerr << "Warning: Cannot update domain bounds. No nodes with coordinates found." << std::endl;
+             return;
+        }
+
+        // Iterate over the rest of the nodes
+        for(const auto& node : nodes) 
+        {
+            if(!node.coordinates.empty() && node.coordinates.size() >= 2) 
+            {
+                xmin = std::min(xmin, node.coordinates[0]);
+                xmax = std::max(xmax, node.coordinates[0]);
+                ymin = std::min(ymin, node.coordinates[1]);
+                ymax = std::max(ymax, node.coordinates[1]);
+            }
+        }
+        // std::cout << "Domain bounds updated: X=[" << xmin << ", " << xmax << "], Y=[" << ymin << ", " << ymax << "]" << std::endl;
+    }
+
+    // The following private method calculates periodic distance (squared) between two nodes.
+    // Assumes periodicity in X and hard walls in Y.
     
+    double get_periodic_distance_sq(std::size_t node1_idx, std::size_t node2_idx) const
+    {
+        const auto& coords1 = nodes[node1_idx].coordinates;
+        const auto& coords2 = nodes[node2_idx].coordinates;
 
+        // If no coords, return a huge distance
+        if(coords1.empty() || coords2.empty() || coords1.size() < 2 || coords2.size() < 2) 
+            return std::numeric_limits<double>::max();
 
+        double L_x = xmax - xmin;
+        if(L_x <= 0) return std::numeric_limits<double>::max(); // Invalid bounds
+
+        double dx = std::abs(coords1[0] - coords2[0]);
+        double dx_pbc = std::min(dx, L_x - dx); // Periodic distance in X
+        double dy = std::abs(coords1[1] - coords2[1]); // Normal distance in Y
+
+        return (dx_pbc * dx_pbc) + (dy * dy);
+    }
+
+    // The following private method finds the N closest inlet nodes to a given outlet node.
+    // Uses periodic distance.
+    
+    std::vector<std::size_t> find_closest_inlets(std::size_t outlet_node_idx, int n_closest) const
+    {
+        std::multimap<double, std::size_t> dist_map;
+        for(std::size_t inlet_idx : inlet) 
+        {
+            double dist_sq = get_periodic_distance_sq(outlet_node_idx, inlet_idx);
+            dist_map.insert({dist_sq, inlet_idx});
+        }
+
+        std::vector<std::size_t> closest;
+        int count = 0;
+        for(auto const& [dist, idx] : dist_map) 
+        {
+            closest.push_back(idx);
+            count++;
+            if (count == n_closest) break;
+        }
+        return closest;
+    }
+
+    bool is_DAG_util(std::size_t v, std::vector<int>& visited)
+    {
+        visited[v] = 1; // mark as "currently visiting" (on recursion stack)
+
+        for(const auto& nbr_idx : nodes[v].outnbrs) 
+        {
+            if(visited[nbr_idx] == 0) // if not visited yet
+            {
+                if(is_DAG_util(nbr_idx, visited)) // recurse
+                    return true; // cycle found downstream
+            }
+            else if (visited[nbr_idx] == 1) // if 'nbr' is already on our stack
+            {
+                // This is a "back edge"
+                return true; // Cycle detected
+            }
+            // if visited[nbr_idx] == 2, it's fully processed, so we ignore it.
+        }
+
+        visited[v] = 2; // mark as "fully visited" (off recursion stack)
+        return false; // no cycles found from this node
+    }
+
+    Eigen::SparseMatrix<double, Eigen::RowMajor> matrix_power(std::size_t power) const
+    {
+        std::size_t N = nodes.size();
+        // Ensure result and temp matrices are also RowMajor
+        Eigen::SparseMatrix<double, Eigen::RowMajor> result(N, N);
+        
+        if(power == 0) 
+        {
+            result.setIdentity();
+            return result;
+        }
+
+        result.setIdentity(); // Start with result = A^0 (Identity)
+        
+        // 'temp' will hold the powers of A: A^1, A^2, A^4, A^8, ...
+        Eigen::SparseMatrix<double, Eigen::RowMajor> temp = weights_matrix; // Start with temp = A^1
+        
+        while(power > 0) 
+        {
+            // If the current bit of 'power' is 1 (i.e., power is odd)
+            if(power % 2 == 1) result = (result * temp).pruned();
+            
+            // Square 'temp' for the next bit
+            temp = (temp * temp).pruned();
+            
+            // Move to the next bit (integer division by 2)
+            power /= 2;
+        }
+        return result;
+    }
+
+     
+    
 public:
     void add_link(std::size_t i, std::size_t j, double weight=1.0)
     {
@@ -313,7 +528,9 @@ public:
         }
         fin.close();
         std::cout << "Successfully read coordinates for " << nodes.size() << " nodes from " << filename << std::endl;
+        update_domain_bounds();
     }
+
     void check_mass_conservation()
     {
         std::cout << "Checking mass conservation for non-outlet nodes..." << std::endl;
@@ -352,67 +569,513 @@ public:
     }
 
 
-    void compute_stationary_flows()
+    void compute_stationary_flows_old(RNG& Rand, bool PBC = false)
     {
-        std::vector<std::size_t> active_nodes;
-        // First, we define some functions:
-
-        auto initialize_active_nodes = [&]()
+        if(!PBC) 
         {
-            if(inlet.empty()) (*this).update_boundaries();
-            if(inlet.empty()) 
-            {
-                std::cerr << "The graph has no inlet nodes. This is problematic." << std::endl;
-                std::exit(1);
-            }
-            
-            for(std::size_t i = 0; i < inlet.size(); ++i) for(std::size_t j = 0; j < nodes[inlet[i]].outnbrs.size(); ++j) 
-                active_nodes.push_back(nodes[inlet[i]].outnbrs[j]);
+            // Standard (non-PBC) computation
+            run_flow_sweep();
+            return;
+        }
 
-            erase_duplicates(active_nodes);
+        // PBC = true: Iterative computation 
+        std::cout << "Starting PBC flow computation..." << std::endl;
+        
+        // Ensure domain bounds are set (critical for distance calcs)
+        if(xmax - xmin <= 0) 
+        {
+            std::cerr << "Error: Invalid domain bounds for PBC. Trying to update them..." << std::endl;
+            update_domain_bounds();
+            if(xmax - xmin <= 0) 
+            {
+                 std::cerr << "Fatal Error: Cannot run PBC without valid coordinates and domain bounds." << std::endl;
+                 std::exit(1);
+            }
+        }
+
+        // Run one tentative sweep to get initial outlet mass
+        run_flow_sweep();
+
+        // This struct will store the fixed rule for each outlet node
+        struct PBCFeedbackRule 
+        {
+            bool is_splitter = false;
+            double fraction_to_first = 0.5; // The random fraction, if it's a splitter
         };
 
-        auto update_active_nodes = [&](const std::vector<double>& new_flows)
-        {
-            std::vector<std::size_t> new_active_nodes;
+        // This map stores the rule (Value) for each outlet_idx (Key)
+        std::map<size_t, PBCFeedbackRule> feedback_rules;
 
-            for(std::size_t i = 0; i < active_nodes.size(); ++i) 
+        std::cout << "PBC: Determining fixed feedback rules..." << std::endl;
+        for(size_t outlet_idx : outlet) 
+        {
+            PBCFeedbackRule rule;
+            if (Rand() < 0.5) 
+            { 
+                // Decide splitter status ONCE
+                rule.is_splitter = true;
+                rule.fraction_to_first = Rand(); // Decide fraction ONCE
+            } 
+            else 
             {
-                if(std::abs(new_flows[i] - nodes[active_nodes[i]].mass) > 1e-10)
+                rule.is_splitter = false;
+                // rule.fraction_to_first is unused
+            }
+            feedback_rules[outlet_idx] = rule; // Store the rule
+        }
+        std::cout << "PBC: Rules stored. Starting convergence loop." << std::endl;
+
+        std::vector<double> old_masses(nodes.size());
+        double max_diff = std::numeric_limits<double>::max();
+        const double CONVERGENCE_THRESHOLD = 1e-9;
+        int iter = 0;
+        const int MAX_ITER = 1000;
+
+        while(max_diff > CONVERGENCE_THRESHOLD && iter < MAX_ITER)
+        {
+            // Store current masses for convergence check
+            for(std::size_t i = 0; i < nodes.size(); ++i) old_masses[i] = nodes[i].mass;
+
+            // Sum up total mass at all outlets
+            double total_outlet_mass = 0.0;
+            for(std::size_t outlet_idx : outlet) 
+                total_outlet_mass += nodes[outlet_idx].mass;
+            
+            if(total_outlet_mass < 1e-15) 
+            {
+                std::cout << "PBC: Total outlet mass is 0. System is static. Converged." << std::endl;
+                break;
+            }
+
+            // Set all inlet masses to zero, ready for transfer
+            for(std::size_t inlet_idx : inlet) nodes[inlet_idx].mass = 0.0;
+            
+
+            // Perform the mass transfer from outlet to inlet 
+            for(std::size_t outlet_idx : outlet) 
+            {
+                double outlet_mass = nodes[outlet_idx].mass;
+                if(outlet_mass < 1e-15) continue;
+
+                // Get the pre-determined rule for this outlet
+                const auto& rule = feedback_rules.at(outlet_idx);
+
+                if (rule.is_splitter) 
+                { 
+                    // Use the stored 'is_splitter'
+                    auto closest = find_closest_inlets(outlet_idx, 2);
+                    if(closest.empty()) continue; 
+                    if(closest.size() < 2) nodes[closest[0]].mass += outlet_mass;
+                    else 
+                    {
+                        double fraction = rule.fraction_to_first; // Use the stored 'fraction'
+                        nodes[closest[0]].mass += fraction * outlet_mass;
+                        nodes[closest[1]].mass += (1.0 - fraction) * outlet_mass;
+                    }
+                } 
+
+                else 
+                { 
+                    // Not a splitter (based on stored rule)
+                    auto closest = find_closest_inlets(outlet_idx, 1);
+                    if(!closest.empty()) nodes[closest[0]].mass += outlet_mass;
+                }
+                
+            } // end for each outlet
+
+            // Check mass conservation and renormalize inlets
+            double total_inlet_mass = 0.0;
+            for(std::size_t inlet_idx : inlet) total_inlet_mass += nodes[inlet_idx].mass;
+            
+            
+            if(std::abs(total_inlet_mass - total_outlet_mass) > 1e-9) 
+            {
+                std::cerr << "PBC Iter " << iter << ": Mass conservation warning. " << "Outlet: " << total_outlet_mass << ", Inlet (post-transfer): " << total_inlet_mass << std::endl;
+                // Renormalize inlets to enforce conservation
+                if(total_inlet_mass > 1e-10) 
                 {
-                    for(std::size_t j = 0; j < nodes[active_nodes[i]].outnbrs.size(); ++j) 
-                        new_active_nodes.push_back(nodes[active_nodes[i]].outnbrs[j]);
+                    double re_norm_factor = total_outlet_mass / total_inlet_mass;
+                    for (std::size_t inlet_idx : inlet) nodes[inlet_idx].mass *= re_norm_factor;
                 }
             }
 
-            erase_duplicates(new_active_nodes);
-            for(std::size_t i = 0; i < active_nodes.size(); ++i) nodes[active_nodes[i]].mass = new_flows[i];
-            active_nodes = new_active_nodes;
-        };
+            // Re-sweep the network with the new inlet masses
+            run_flow_sweep();
 
+            // Check convergence by comparing new masses to old masses
+            max_diff = 0.0;
+            for(std::size_t i = 0; i < nodes.size(); ++i) 
+                max_diff = std::max(max_diff, std::abs(nodes[i].mass - old_masses[i]));
+            
+            // std::cout << "  PBC Iter " << iter << ", Max Mass Diff: " << max_diff << std::endl;
+            iter++;
+        } 
 
-        auto sweep = [&]()
-        {
-            std::vector<double> new_flows(active_nodes.size(), 0.0);
-            for(std::size_t i = 0; i < active_nodes.size(); ++i)
-            {
-                std::size_t label = active_nodes[i];
-
-                for(std::size_t j = 0; j < nodes[label].innbrs.size(); ++j)
-                {
-                    std::size_t innbr = nodes[label].innbrs[j];
-                    new_flows[i] += nodes[label].inwgs[j]*nodes[innbr].mass;
-                }    
-            }
-            update_active_nodes(new_flows);
-        };
-
-        // Now, the core of the function itself:
-
-        initialize_active_nodes();
-        while(!active_nodes.empty()) sweep();
-        
+        if (iter == MAX_ITER)
+            std::cerr << "Warning: PBC computation did not converge after " << MAX_ITER << " iterations. Max diff: " << max_diff << std::endl;
+        else std::cout << "PBC computation converged in " << iter << " iterations. Max diff: " << max_diff << std::endl;
+    
     }
+
+    bool is_DAG()
+    {
+        std::size_t N = nodes.size();
+        if(N == 0) return true; // an empty graph is a DAG
+
+        // visited state: 0=unvisited, 1=visiting (on stack), 2=visited
+        std::vector<int> visited(N, 0);
+
+        for(std::size_t i = 0; i < N; ++i)
+        {
+            if(visited[i] == 0) // If we haven't processed this node yet
+            {
+                if (is_DAG_util(i, visited))
+                {
+                    std::cout << "Cycle detected starting from node " << i << std::endl;
+                    return false; // Cycle found
+                }
+            }
+        }
+        return true; // no cycles found
+    }
+
+
+    // The following public method is a HELPER for compute_all_cumulative_degrees.
+    // It runs BFS from a start node and returns a distance vector.
+     
+    Eigen::RowVectorXi run_bfs_distance_internal(std::size_t start_node, std::size_t N, bool use_innbrs)
+    {
+        Eigen::RowVectorXi distances(N);
+        distances.setConstant(-1); // -1 = unvisited
+        std::queue<std::size_t> q;
+
+        q.push(start_node);
+        distances(start_node) = 0;
+
+        while(!q.empty())
+        {
+            std::size_t current_node_idx = q.front();
+            q.pop();
+            
+            const auto& neighbors = use_innbrs ? nodes[current_node_idx].innbrs : nodes[current_node_idx].outnbrs;
+            for(const auto& nbr_idx : neighbors)
+            {
+                if(distances(nbr_idx) == -1) // If unvisited
+                {
+                    distances(nbr_idx) = distances(current_node_idx) + 1;
+                    q.push(nbr_idx);
+                }
+            }
+        }
+        return distances;
+    }
+
+
+    // The following public method computes the full distance histograms for all nodes.
+    // This is an expensive, one-time calculation.
+
+    // max_k is the maximum distance to histogram.
+    // out_dist_hist (Output) Vector [node_idx][dist] = count
+    // in_dist_hist (Output) Vector [node_idx][dist] = count
+     
+    void compute_all_distance_histograms(std::size_t max_k, std::vector<std::vector<std::size_t>>& out_dist_hist, std::vector<std::vector<std::size_t>>& in_dist_hist)
+    {
+        std::size_t N = nodes.size();
+        if(N == 0) return;
+
+        std::cout << "Running one-time distance histogram calculation (N * BFS + O(N^2))..." << std::endl;
+
+        // Resize output histograms
+        // [node_idx][distance]
+        out_dist_hist.assign(N, std::vector<std::size_t>(max_k + 1, 0));
+        in_dist_hist.assign(N, std::vector<std::size_t>(max_k + 1, 0));
+
+        // Run N * BFS and build the O(N^2) distance matrices locally
+        Eigen::MatrixXi out_distance_matrix(N, N);
+        Eigen::MatrixXi in_distance_matrix(N, N);
+
+        for(std::size_t i = 0; i < N; ++i)
+        {
+            out_distance_matrix.row(i) = run_bfs_distance_internal(i, N, false);
+            in_distance_matrix.row(i) = run_bfs_distance_internal(i, N, true);
+        }
+
+        // Scan the matrices ONCE (O(N^2)) to build histograms
+        for(std::size_t i = 0; i < N; ++i)
+        {
+            for(std::size_t j = 0; j < N; ++j)
+            {
+                if(i == j) continue;
+
+                // Out-degree: path from i to j
+                int dist_out = out_distance_matrix(i, j);
+                if(dist_out > 0 && dist_out <= max_k) out_dist_hist[i][dist_out]++;
+                
+
+                // In-degree: path from j to i
+                int dist_in = in_distance_matrix(i, j); // This is dist(j -> i)
+                if(dist_in > 0 && dist_in <= max_k) in_dist_hist[i][dist_in]++; // Histogram for node 'i'
+            
+            }
+        }
+        std::cout << "Distance histograms complete." << std::endl;
+    }
+
+
+
+    // The following method Computes the stationary flows by solving the linear system directly.
+    // Rand: a reference to the RNG object (needed for PBC logic).
+    // PBC:  if true, solves the closed-loop stationary distribution.
+    // If false (default), solves the open-loop flow propagation.
+    void compute_stationary_flows(RNG& Rand, bool PBC = false)
+    {
+        std::size_t N = nodes.size();
+        if (N == 0) return;
+
+        // std::cout << "Building linear system for direct solver..." << std::endl;
+
+        // The system is Ax = b
+        // A is the matrix (I - T_internal - T_pbc)
+        // x is the unknown mass vector (m)
+        // b is the source vector (inlet masses, or 0 for PBC)
+        
+        Eigen::SparseMatrix<double> A(N, N);
+        Eigen::VectorXd b(N);
+        b.setZero(); // Initialize b vector to all zeros
+
+        // We build the matrix A using a list of triplets for efficiency
+        std::vector<Eigen::Triplet<double>> triplets;
+        triplets.reserve(N + links.size() + (PBC ? outlet.size() * 2 : 0));
+
+        double total_inlet_mass = 0.0;
+
+        // Build the (I - T_internal) part of the matrix 
+        for(std::size_t i = 0; i < N; ++i) 
+        {
+            // Add the diagonal '1' (from the Identity matrix I)
+            triplets.push_back(Eigen::Triplet<double>(i, i, 1.0));
+
+            if(nodes[i].is_boundary && nodes[i].innbrs.empty()) 
+            {
+                // This is an INLET node.
+                // For non-PBC, its mass is fixed by the source vector b.
+                // For PBC, its mass is determined by the feedback.
+                if(!PBC) b(i) = nodes[i].mass;
+                total_inlet_mass += nodes[i].mass;
+            }
+
+            else 
+            {
+                // This is a BULK or OUTLET node.
+                // Add the incoming flow contributions: -T
+                // m_i = SUM(m_j * w_ji)  -->  m_i - SUM(m_j * w_ji) = 0
+                for(std::size_t k = 0; k < nodes[i].innbrs.size(); ++k) 
+                {
+                    std::size_t j = nodes[i].innbrs[k]; // j is the source node
+                    double w_ji = nodes[i].inwgs[k];    // w_ji is the weight from j to i
+                    triplets.push_back(Eigen::Triplet<double>(i, j, -w_ji));
+                }
+            }
+        }
+
+        // Handle the PBC case (if applicable)
+        if(PBC) 
+        {
+            // std::cout << "PBC enabled: Building feedback part of the matrix..." << std::endl;
+            if(xmax - xmin <= 0) 
+            {
+                 std::cerr << "Fatal Error: Cannot run PBC without valid coordinates and domain bounds." << std::endl;
+                 std::exit(1);
+            }
+
+            // Determine the fixed feedback rules ONCE
+            struct PBCFeedbackRule { bool is_splitter = false; double fraction_to_first = 0.5; };
+            std::map<size_t, PBCFeedbackRule> feedback_rules;
+            for(std::size_t outlet_idx : outlet) 
+            {
+                PBCFeedbackRule rule;
+                if(Rand() < 0.5) 
+                { 
+                    rule.is_splitter = true; 
+                    rule.fraction_to_first = Rand(); 
+                }
+                feedback_rules[outlet_idx] = rule;
+            }
+
+            // Add the feedback links (-T_pbc) to the matrix
+            // m_inlet = F(m_outlet)  -->  m_inlet - F(m_outlet) = 0
+            for(size_t outlet_idx : outlet) 
+            {
+                const auto& rule = feedback_rules.at(outlet_idx);
+                
+                if(rule.is_splitter) 
+                {
+                    auto closest = find_closest_inlets(outlet_idx, 2);
+                    if(closest.size() == 2) 
+                    {
+                        triplets.push_back(Eigen::Triplet<double>(closest[0], outlet_idx, -rule.fraction_to_first));
+                        triplets.push_back(Eigen::Triplet<double>(closest[1], outlet_idx, -(1.0 - rule.fraction_to_first)));
+                    } 
+                    else if (closest.size() == 1) triplets.push_back(Eigen::Triplet<double>(closest[0], outlet_idx, -1.0));
+            
+                } 
+
+                else 
+                { 
+                    // Not a splitter
+                    auto closest = find_closest_inlets(outlet_idx, 1);
+                    if (!closest.empty()) 
+                        triplets.push_back(Eigen::Triplet<double>(closest[0], outlet_idx, -1.0));
+                }
+            }
+
+            // Solve the stationary distribution (Homogeneous system) 
+            // The system (I - T_int - T_pbc)m = 0 is singular (by design).
+            // We must replace one equation with the conservation of mass: SUM(m_i) = 1.0 (or total_inlet_mass)
+            
+            std::vector<Eigen::Triplet<double>> final_triplets;
+
+            if(inlet.empty()) 
+            {
+                std::cerr << "Fatal Error: PBC enabled but no inlet nodes found." << std::endl;
+                std::exit(1);
+            }
+            std::size_t row_to_replace = inlet[0]; // Use the first inlet node
+            // std::cout << "PBC: Replacing equation for node " << row_to_replace << " with conservation rule." << std::endl;
+
+            // Copy all triplets *except* those for the row we're replacing
+            for(const auto& t : triplets) if(t.row() != row_to_replace) final_triplets.push_back(t);
+            
+            // Add the NEW conservation equation: SUM(m_inlet) = total_inlet_mass
+            for (std::size_t i = 0; i < N; ++i) 
+            {
+                // Check if node 'i' is an inlet
+                if (nodes[i].is_boundary && nodes[i].innbrs.empty()) 
+                    final_triplets.push_back(Eigen::Triplet<double>(row_to_replace, i, 1.0));
+                
+            }
+    
+            // Set the 'b' vector for this equation
+            // b is already all zeros, so just set the one element
+            b(row_to_replace) = total_inlet_mass;
+
+            // Build the final matrix A
+            A.setFromTriplets(final_triplets.begin(), final_triplets.end());
+
+        } 
+        
+        else 
+        {
+            // Non-PBC case: just build the matrix from the first loop 
+            A.setFromTriplets(triplets.begin(), triplets.end());
+        }
+
+        // Solve the system Ax = b 
+        // std::cout << "Solving system with " << N << " nodes..." << std::endl;
+        Eigen::SparseLU<Eigen::SparseMatrix<double>> solver;
+        
+        solver.compute(A);
+        if(solver.info() != Eigen::Success) 
+        {
+            std::cerr << "Fatal Error: Eigen solver matrix decomposition failed." << std::endl;
+            std::exit(1);
+        }
+
+        Eigen::VectorXd m = solver.solve(b);
+        if(solver.info() != Eigen::Success) 
+        {
+            std::cerr << "Fatal Error: Eigen solver failed to solve the system." << std::endl;
+            std::exit(1);
+        }
+
+        // std::cout << "System solved. Copying mass vector back to nodes." << std::endl;
+
+        // Copy the solution vector 'm' back into the graph nodes
+        for (std::size_t i = 0; i < N; ++i) nodes[i].mass = m(i);
+    }
+
+    void compute_weighted_power(std::size_t k)
+    {
+        std::size_t N = nodes.size();
+        if(N == 0) return; // Empty graph
+
+        // Case 0: Already computed
+        if(k == current_k && weights_matrix_powered.size() > 0) 
+        {
+            std::cout << "Matrix A^" << k << " is already cached." << std::endl;
+            return;
+        }
+
+        // Case 1: Compute k=0 (Identity)
+        if(k == 0) 
+        {
+            std::cout << "Computing A^0 (Identity)..." << std::endl;
+            weights_matrix_powered.resize(N, N);
+            weights_matrix_powered.setIdentity();
+            current_k = 0;
+            return;
+        }
+
+        // Case 2: Compute k=1 (Base Adjacency Matrix)
+        // This is the "bootstrapper" for all other calculations.
+        if(k == 1) 
+        {
+            std::cout << "Computing A^1 (Base Adjacency Matrix)..." << std::endl;
+            
+            // Build A^1 (weights_matrix) if it's not already built
+            if(weights_matrix.size() == 0) 
+            {
+                std::vector<Eigen::Triplet<double>> triplets;
+                triplets.reserve(links.size());
+                for(const auto& link : links) 
+                {
+                    triplets.push_back(Eigen::Triplet<double>(link.in, link.out, link.weight));
+                }
+                weights_matrix.resize(N, N);
+                weights_matrix.setFromTriplets(triplets.begin(), triplets.end());
+            }
+            weights_matrix_powered = weights_matrix;
+            current_k = 1;
+            return;
+        }
+        
+        // k>1:
+
+        // Ensure A^1 (weights_matrix) is available to power up
+        if(weights_matrix.size() == 0) 
+        {
+            std::cout << "Base matrix A^1 not found, computing it first..." << std::endl;
+            compute_weighted_power(1); // This sets current_k=1 and weights_matrix_powered=A^1
+        }
+        
+        // Case 3: k > current_k
+        // We need to compute A^k. We have A^current_k.
+        // We calculate A^(k - current_k) and multiply.
+        if(k > current_k && current_k > 0)
+        {
+            std::size_t diff = k - current_k;
+            std::cout << "Optimized path: Computing A^" << diff << " to multiply by cached A^" << current_k << "..." << std::endl;
+            
+            // Use the helper to get A^diff
+            Eigen::SparseMatrix<double, Eigen::RowMajor> A_diff = matrix_power(diff);
+            
+            // A^k = A^current_k * A^diff
+            weights_matrix_powered = (weights_matrix_powered * A_diff).pruned();
+            current_k = k;
+        }
+        // Case 4: k < current_k OR we are starting from A^0 (Must recompute from scratch)
+        // e.g., we have A^10 but want A^3. We can't divide.
+        else 
+        {
+            std::cout << "Re-computing A^" << k << " from scratch..." << std::endl;
+            
+            // Use the helper to get A^k directly from A^1
+            weights_matrix_powered = matrix_power(k);
+            current_k = k;
+        }
+    }
+
+    
 
     Graph(const std::string& file_name, const std::string& coords_filename = "") ///this is the constructor
     {
@@ -430,13 +1093,14 @@ public:
         while(fin >> i >> j >> weight) add_link(i, j, weight);
         fin.close();
 
-        check_and_renormalize_weights();
+        check_and_renormalize_weights(); // Enforce K1L
 
         // Read node coordinates (if provided)
         if (!coords_filename.empty()) 
         {
             try 
             {
+                // This will also call update_domain_bounds() internally
                 read_coordinates(coords_filename);
             } 
             catch (const std::runtime_error& e) 
@@ -447,7 +1111,8 @@ public:
         }
 
         update_boundaries();
-        compute_stationary_flows();
+        compute_weighted_power(1);
+       
     }
 
     void print_links()
