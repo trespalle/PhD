@@ -71,6 +71,14 @@ namespace myfun {
         double percentile = 100.0
     );
 
+    void med_var_skew(
+        const std::vector<double>& data,
+        double& media,
+        double& varianza,
+        double& skewness,
+        double percentile = 99.6 
+    );
+
     //Funcion para guardar un histograma 2D ponderado
     void guarda2DHistograma(
         const std::vector<double>& histogram,

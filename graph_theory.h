@@ -28,8 +28,7 @@ struct Node
     std::vector<double> coordinates;
     std::vector<std::size_t> outnbrs, innbrs, outlnks, inlnks; ///list of outnbrs and innbrs labels
     std::vector<double> outwgs, inwgs;
-    std::size_t cumulative_k_out_degree = 0;
-    std::size_t cumulative_k_in_degree = 0;
+    int dist_to_inlet = -1;
     
 };
 
@@ -61,74 +60,6 @@ private:
         for(pos = 0; pos < people.size(); ++pos) if(people[pos] == guy) return pos;
         std::cout << "We are sorry, but the element was not found in the vector." << std::endl;
         std::exit(1);
-    }
-
-    void erase_duplicates(std::vector<std::size_t>& my_vector)
-    {
-        std::sort(my_vector.begin(), my_vector.end());
-        auto last = std::unique(my_vector.begin(), my_vector.end()); // "unique" puts the unique elements of the vector first and then the rest
-        // last is an iterator (the C++ evolution of the pointer, a pointer with gadgets) that point to the begining of that "rest" in the new vector
-        my_vector.erase(last, my_vector.end()); ///daraa
-    }
-
-    void run_flow_sweep()
-    {
-        std::vector<std::size_t> active_nodes;
-        // First, we define some functions:
-
-        auto initialize_active_nodes = [&]()
-        {
-            if(inlet.empty()) (*this).update_boundaries();
-            if(inlet.empty()) 
-            {
-                std::cerr << "The graph has no inlet nodes. This is problematic." << std::endl;
-                std::exit(1);
-            }
-            
-            for(std::size_t i = 0; i < inlet.size(); ++i) for(std::size_t j = 0; j < nodes[inlet[i]].outnbrs.size(); ++j) 
-                active_nodes.push_back(nodes[inlet[i]].outnbrs[j]);
-
-            erase_duplicates(active_nodes);
-        };
-
-        auto update_active_nodes = [&](const std::vector<double>& new_flows)
-        {
-            std::vector<std::size_t> new_active_nodes;
-
-            for(std::size_t i = 0; i < active_nodes.size(); ++i) 
-            {
-                if(std::abs(new_flows[i] - nodes[active_nodes[i]].mass) > 1e-10)
-                {
-                    for(std::size_t j = 0; j < nodes[active_nodes[i]].outnbrs.size(); ++j) 
-                        new_active_nodes.push_back(nodes[active_nodes[i]].outnbrs[j]);
-                }
-            }
-
-            erase_duplicates(new_active_nodes);
-            for(std::size_t i = 0; i < active_nodes.size(); ++i) nodes[active_nodes[i]].mass = new_flows[i];
-            active_nodes = new_active_nodes;
-        };
-
-
-        auto sweep = [&]()
-        {
-            std::vector<double> new_flows(active_nodes.size(), 0.0);
-            for(std::size_t i = 0; i < active_nodes.size(); ++i)
-            {
-                std::size_t label = active_nodes[i];
-
-                for(std::size_t j = 0; j < nodes[label].innbrs.size(); ++j)
-                {
-                    std::size_t innbr = nodes[label].innbrs[j];
-                    new_flows[i] += nodes[label].inwgs[j]*nodes[innbr].mass;
-                }    
-            }
-            update_active_nodes(new_flows);
-        };
-
-        // Now, the core of the function itself:
-        initialize_active_nodes();
-        while(!active_nodes.empty()) sweep();
     }
 
     // The following private method finds the min/max X and Y coordinates from all nodes. Necessary for PBC distance calculations.
@@ -268,6 +199,37 @@ private:
         }
         return result;
     }
+
+    // The following private method is a HELPER for compute_all_cumulative_degrees.
+    // It runs BFS from a start node and returns a distance vector.
+     
+    Eigen::RowVectorXi run_bfs_distance_internal(std::size_t start_node, std::size_t N, bool use_innbrs)
+    {
+        Eigen::RowVectorXi distances(N);
+        distances.setConstant(-1); // -1 = unvisited
+        std::queue<std::size_t> q;
+
+        q.push(start_node);
+        distances(start_node) = 0;
+
+        while(!q.empty())
+        {
+            std::size_t current_node_idx = q.front();
+            q.pop();
+            
+            const auto& neighbors = use_innbrs ? nodes[current_node_idx].innbrs : nodes[current_node_idx].outnbrs;
+            for(const auto& nbr_idx : neighbors)
+            {
+                if(distances(nbr_idx) == -1) // If unvisited
+                {
+                    distances(nbr_idx) = distances(current_node_idx) + 1;
+                    q.push(nbr_idx);
+                }
+            }
+        }
+        return distances;
+    }
+
 
      
     
@@ -568,153 +530,63 @@ public:
         }
     }
 
-
-    void compute_stationary_flows_old(RNG& Rand, bool PBC = false)
+    void compute_distances_from_inlet()
     {
-        if(!PBC) 
-        {
-            // Standard (non-PBC) computation
-            run_flow_sweep();
-            return;
-        }
+        std::cout << "Computing topological distances from inlets..." << std::endl;
 
-        // PBC = true: Iterative computation 
-        std::cout << "Starting PBC flow computation..." << std::endl;
+        // Reset distances and prepare queue
+        std::queue<std::size_t> q;
         
-        // Ensure domain bounds are set (critical for distance calcs)
-        if(xmax - xmin <= 0) 
+        for(auto& node : nodes) node.dist_to_inlet = -1; // reset to unvisited
+        
+        // Initialize BFS with all inlet nodes (distance 0)
+        for(std::size_t inlet_idx : inlet) 
         {
-            std::cerr << "Error: Invalid domain bounds for PBC. Trying to update them..." << std::endl;
-            update_domain_bounds();
-            if(xmax - xmin <= 0) 
-            {
-                 std::cerr << "Fatal Error: Cannot run PBC without valid coordinates and domain bounds." << std::endl;
-                 std::exit(1);
-            }
+            nodes[inlet_idx].dist_to_inlet = 0;
+            q.push(inlet_idx);
         }
 
-        // Run one tentative sweep to get initial outlet mass
-        run_flow_sweep();
-
-        // This struct will store the fixed rule for each outlet node
-        struct PBCFeedbackRule 
+        // Run BFS
+        while(!q.empty())
         {
-            bool is_splitter = false;
-            double fraction_to_first = 0.5; // The random fraction, if it's a splitter
-        };
+            std::size_t u_idx = q.front();
+            q.pop();
 
-        // This map stores the rule (Value) for each outlet_idx (Key)
-        std::map<size_t, PBCFeedbackRule> feedback_rules;
+            int current_dist = nodes[u_idx].dist_to_inlet;
 
-        std::cout << "PBC: Determining fixed feedback rules..." << std::endl;
-        for(size_t outlet_idx : outlet) 
-        {
-            PBCFeedbackRule rule;
-            if (Rand() < 0.5) 
-            { 
-                // Decide splitter status ONCE
-                rule.is_splitter = true;
-                rule.fraction_to_first = Rand(); // Decide fraction ONCE
-            } 
-            else 
+            // Explore neighbors (downstream)
+            for (std::size_t v_idx : nodes[u_idx].outnbrs)
             {
-                rule.is_splitter = false;
-                // rule.fraction_to_first is unused
-            }
-            feedback_rules[outlet_idx] = rule; // Store the rule
-        }
-        std::cout << "PBC: Rules stored. Starting convergence loop." << std::endl;
-
-        std::vector<double> old_masses(nodes.size());
-        double max_diff = std::numeric_limits<double>::max();
-        const double CONVERGENCE_THRESHOLD = 1e-9;
-        int iter = 0;
-        const int MAX_ITER = 1000;
-
-        while(max_diff > CONVERGENCE_THRESHOLD && iter < MAX_ITER)
-        {
-            // Store current masses for convergence check
-            for(std::size_t i = 0; i < nodes.size(); ++i) old_masses[i] = nodes[i].mass;
-
-            // Sum up total mass at all outlets
-            double total_outlet_mass = 0.0;
-            for(std::size_t outlet_idx : outlet) 
-                total_outlet_mass += nodes[outlet_idx].mass;
-            
-            if(total_outlet_mass < 1e-15) 
-            {
-                std::cout << "PBC: Total outlet mass is 0. System is static. Converged." << std::endl;
-                break;
-            }
-
-            // Set all inlet masses to zero, ready for transfer
-            for(std::size_t inlet_idx : inlet) nodes[inlet_idx].mass = 0.0;
-            
-
-            // Perform the mass transfer from outlet to inlet 
-            for(std::size_t outlet_idx : outlet) 
-            {
-                double outlet_mass = nodes[outlet_idx].mass;
-                if(outlet_mass < 1e-15) continue;
-
-                // Get the pre-determined rule for this outlet
-                const auto& rule = feedback_rules.at(outlet_idx);
-
-                if (rule.is_splitter) 
-                { 
-                    // Use the stored 'is_splitter'
-                    auto closest = find_closest_inlets(outlet_idx, 2);
-                    if(closest.empty()) continue; 
-                    if(closest.size() < 2) nodes[closest[0]].mass += outlet_mass;
-                    else 
-                    {
-                        double fraction = rule.fraction_to_first; // Use the stored 'fraction'
-                        nodes[closest[0]].mass += fraction * outlet_mass;
-                        nodes[closest[1]].mass += (1.0 - fraction) * outlet_mass;
-                    }
-                } 
-
-                else 
-                { 
-                    // Not a splitter (based on stored rule)
-                    auto closest = find_closest_inlets(outlet_idx, 1);
-                    if(!closest.empty()) nodes[closest[0]].mass += outlet_mass;
-                }
-                
-            } // end for each outlet
-
-            // Check mass conservation and renormalize inlets
-            double total_inlet_mass = 0.0;
-            for(std::size_t inlet_idx : inlet) total_inlet_mass += nodes[inlet_idx].mass;
-            
-            
-            if(std::abs(total_inlet_mass - total_outlet_mass) > 1e-9) 
-            {
-                std::cerr << "PBC Iter " << iter << ": Mass conservation warning. " << "Outlet: " << total_outlet_mass << ", Inlet (post-transfer): " << total_inlet_mass << std::endl;
-                // Renormalize inlets to enforce conservation
-                if(total_inlet_mass > 1e-10) 
+                if (nodes[v_idx].dist_to_inlet == -1) // If unvisited
                 {
-                    double re_norm_factor = total_outlet_mass / total_inlet_mass;
-                    for (std::size_t inlet_idx : inlet) nodes[inlet_idx].mass *= re_norm_factor;
+                    nodes[v_idx].dist_to_inlet = current_dist + 1;
+                    q.push(v_idx);
                 }
             }
+        }
+        std::cout << "Distance computation complete." << std::endl;
+    }
 
-            // Re-sweep the network with the new inlet masses
-            run_flow_sweep();
+    void refresh_weights()
+    {
+        std::size_t N = nodes.size();
+        if(N == 0) return;
 
-            // Check convergence by comparing new masses to old masses
-            max_diff = 0.0;
-            for(std::size_t i = 0; i < nodes.size(); ++i) 
-                max_diff = std::max(max_diff, std::abs(nodes[i].mass - old_masses[i]));
-            
-            // std::cout << "  PBC Iter " << iter << ", Max Mass Diff: " << max_diff << std::endl;
-            iter++;
-        } 
+        // Rebuild weights_matrix from updated links
+        std::vector<Eigen::Triplet<double>> triplets;
+        triplets.reserve(links.size());
+        for(const auto& link : links)
+            triplets.push_back(Eigen::Triplet<double>(link.in, link.out, link.weight));
+        
+        
+        weights_matrix.setZero(); // Clear old values
+        weights_matrix.setFromTriplets(triplets.begin(), triplets.end());
 
-        if (iter == MAX_ITER)
-            std::cerr << "Warning: PBC computation did not converge after " << MAX_ITER << " iterations. Max diff: " << max_diff << std::endl;
-        else std::cout << "PBC computation converged in " << iter << " iterations. Max diff: " << max_diff << std::endl;
-    
+        // Reset cache
+        weights_matrix_powered = weights_matrix;
+        current_k = 1;
+        
+        std::cout << "Graph weights refreshed from link list." << std::endl;
     }
 
     bool is_DAG()
@@ -738,38 +610,6 @@ public:
         }
         return true; // no cycles found
     }
-
-
-    // The following public method is a HELPER for compute_all_cumulative_degrees.
-    // It runs BFS from a start node and returns a distance vector.
-     
-    Eigen::RowVectorXi run_bfs_distance_internal(std::size_t start_node, std::size_t N, bool use_innbrs)
-    {
-        Eigen::RowVectorXi distances(N);
-        distances.setConstant(-1); // -1 = unvisited
-        std::queue<std::size_t> q;
-
-        q.push(start_node);
-        distances(start_node) = 0;
-
-        while(!q.empty())
-        {
-            std::size_t current_node_idx = q.front();
-            q.pop();
-            
-            const auto& neighbors = use_innbrs ? nodes[current_node_idx].innbrs : nodes[current_node_idx].outnbrs;
-            for(const auto& nbr_idx : neighbors)
-            {
-                if(distances(nbr_idx) == -1) // If unvisited
-                {
-                    distances(nbr_idx) = distances(current_node_idx) + 1;
-                    q.push(nbr_idx);
-                }
-            }
-        }
-        return distances;
-    }
-
 
     // The following public method computes the full distance histograms for all nodes.
     // This is an expensive, one-time calculation.
@@ -823,7 +663,7 @@ public:
 
 
 
-    // The following method Computes the stationary flows by solving the linear system directly.
+    // The following method computes the stationary flows by solving the linear system directly.
     // Rand: a reference to the RNG object (needed for PBC logic).
     // PBC:  if true, solves the closed-loop stationary distribution.
     // If false (default), solves the open-loop flow propagation.

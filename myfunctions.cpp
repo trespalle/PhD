@@ -236,77 +236,164 @@ namespace myfun {
     double& media,
     double& varianza,
     double percentile 
-)
-{
-    // --- Initial sanity checks ---
-    if (data.empty()) {
-        throw std::invalid_argument("med_var: Data vector cannot be empty.");
-    }
-    if (percentile <= 0.0 || percentile > 100.0) {
-        throw std::invalid_argument("med_var: Percentile must be between 0 (exclusive) and 100 (inclusive).");
-    }
-
-    // --- Case 1: Default behavior, use all data (most common and efficient) ---
-    if (percentile == 100.0) {
-        if (data.size() < 2) {
-            throw std::invalid_argument("med_var: At least two elements are required to calculate variance.");
+    )
+    {
+        // --- Initial sanity checks ---
+        if (data.empty()) {
+            throw std::invalid_argument("med_var: Data vector cannot be empty.");
         }
+        if (percentile <= 0.0 || percentile > 100.0) {
+            throw std::invalid_argument("med_var: Percentile must be between 0 (exclusive) and 100 (inclusive).");
+        }
+
+        // --- Case 1: Default behavior, use all data (most common and efficient) ---
+        if (percentile == 100.0) {
+            if (data.size() < 2) {
+                throw std::invalid_argument("med_var: At least two elements are required to calculate variance.");
+            }
+            
+            double media_acumulada = 0.0;
+            double M2 = 0.0;
+            std::size_t N = data.size();
+
+            for(std::size_t i = 0; i < N; ++i) {
+                double delta = data[i] - media_acumulada;
+                media_acumulada += delta / static_cast<double>(i + 1);
+                M2 += delta * (data[i] - media_acumulada);
+            }
+
+            media = media_acumulada;
+            varianza = M2 / static_cast<double>(N - 1);
+            return; // We are done
+        }
+
+        // --- Case 2: Filter data based on the specified percentile ---
         
+        // 1. Find the value at the given percentile
+        // We must make a copy because nth_element modifies the vector
+        std::vector<double> data_copy = data;
+        std::size_t percentile_index = static_cast<std::size_t>(data.size() * (percentile / 100.0));
+        
+        // Ensure the index is valid
+        if (percentile_index >= data.size()) {
+            percentile_index = data.size() - 1;
+        }
+
+        std::nth_element(data_copy.begin(), data_copy.begin() + percentile_index, data_copy.end());
+        double percentile_value = data_copy[percentile_index];
+
+        // 2. Apply Welford's algorithm only to elements below the percentile value
         double media_acumulada = 0.0;
         double M2 = 0.0;
-        std::size_t N = data.size();
+        std::size_t count = 0; // Count of elements that meet the criteria
 
-        for(std::size_t i = 0; i < N; ++i) {
-            double delta = data[i] - media_acumulada;
-            media_acumulada += delta / static_cast<double>(i + 1);
-            M2 += delta * (data[i] - media_acumulada);
+        for (const auto& value : data) {
+            if (value < percentile_value) {
+                count++;
+                double delta = value - media_acumulada;
+                media_acumulada += delta / static_cast<double>(count);
+                M2 += delta * (value - media_acumulada);
+            }
+        }
+
+        // 3. Finalize the calculation and check for errors on the filtered set
+        if (count == 0) {
+            throw std::runtime_error("med_var: No data found below the specified percentile. Mean and variance are undefined.");
+        }
+        if (count < 2) {
+            throw std::runtime_error("med_var: Fewer than two data points found below the percentile. Variance is undefined.");
         }
 
         media = media_acumulada;
-        varianza = M2 / static_cast<double>(N - 1);
-        return; // We are done
+        varianza = M2 / static_cast<double>(count - 1);
     }
 
-    // --- Case 2: Filter data based on the specified percentile ---
-    
-    // 1. Find the value at the given percentile
-    // We must make a copy because nth_element modifies the vector
-    std::vector<double> data_copy = data;
-    std::size_t percentile_index = static_cast<std::size_t>(data.size() * (percentile / 100.0));
-    
-    // Ensure the index is valid
-    if (percentile_index >= data.size()) {
-        percentile_index = data.size() - 1;
-    }
+    void med_var_skew(
+        const std::vector<double>& data,
+        double& media,
+        double& varianza,
+        double& skewness,
+        double percentile 
+    )
+    {
+        // Data Filtering
+        
+        std::vector<double> filtered_data;
 
-    std::nth_element(data_copy.begin(), data_copy.begin() + percentile_index, data_copy.end());
-    double percentile_value = data_copy[percentile_index];
+        if(percentile == 100.0) 
+        {
+            // If 100%, don't filter, just copy
+            filtered_data = data;
+        } 
+        else 
+        {
+            // If there's a percentile, filter
+            if(data.empty())
+            {
+                media = 0.0; 
+                varianza = 0.0; 
+                skewness = 0.0; 
+                return;
+            }
 
-    // 2. Apply Welford's algorithm only to elements below the percentile value
-    double media_acumulada = 0.0;
-    double M2 = 0.0;
-    std::size_t count = 0; // Count of elements that meet the criteria
+            
+            if (percentile <= 0.0 || percentile > 100.0) throw std::invalid_argument("med_var_skew: Percentile must be (0, 100].");
+            
+            // Find the value at the percentile
+            std::vector<double> data_copy = data;
+            std::size_t percentile_index = static_cast<std::size_t>(data.size() * (percentile / 100.0));
+            if(percentile_index >= data.size()) percentile_index = data.size() - 1;
+            
+            std::nth_element(data_copy.begin(), data_copy.begin() + percentile_index, data_copy.end());
+            double percentile_value = data_copy[percentile_index];
 
-    for (const auto& value : data) {
-        if (value < percentile_value) {
-            count++;
-            double delta = value - media_acumulada;
-            media_acumulada += delta / static_cast<double>(count);
-            M2 += delta * (value - media_acumulada);
+            // Create the filtered data vector
+            filtered_data.reserve(data.size());
+            for(const auto& value : data) 
+                if (value < percentile_value) filtered_data.push_back(value);
+        
         }
-    }
+        
+        // Statistics Calculation (on filtered_data)
 
-    // 3. Finalize the calculation and check for errors on the filtered set
-    if (count == 0) {
-        throw std::runtime_error("med_var: No data found below the specified percentile. Mean and variance are undefined.");
-    }
-    if (count < 2) {
-        throw std::runtime_error("med_var: Fewer than two data points found below the percentile. Variance is undefined.");
-    }
+        std::size_t n = filtered_data.size();
+        media = 0.0;
+        varianza = 0.0;
+        skewness = 0.0;
 
-    media = media_acumulada;
-    varianza = M2 / static_cast<double>(count - 1);
-}
+        if(n == 0) return; // No data, return 0
+
+        // First pass: Calculate Mean
+        for(const auto& value : filtered_data) media += value;
+        media /= static_cast<double>(n);
+
+        if(n < 2) return; // Variance and skewness are undefined, return 0
+
+        // Second pass: Calculate Variance and 3rd Moment (m3) sums
+        double m2_sum = 0.0; // Sum for variance
+        double m3_sum = 0.0; // Sum for skewness
+        for(const auto& value : filtered_data) 
+        {
+            double diff = value - media;
+            m2_sum += diff*diff;
+            m3_sum += diff*diff*diff;
+        }
+        
+        // Unbiased sample variance
+        varianza = m2_sum / (static_cast<double>(n) - 1.0);
+
+        if(n < 3 || varianza == 0) return; // Skewness is undefined, return 0
+        
+        // Skewness
+        double m3 = m3_sum / static_cast<double>(n); // 3rd central moment
+        double s = std::sqrt(varianza); // Standard deviation
+        
+        // Apply bias correction (g1, the one SciPy uses)
+        double n_dbl = static_cast<double>(n);
+        double correction = std::sqrt(n_dbl * (n_dbl - 1.0)) / (n_dbl - 2.0);
+        
+        skewness = (m3 / (s*s*s)) * correction;
+    }
 
     void guarda2DHistograma(
         const std::vector<double>& histogram,

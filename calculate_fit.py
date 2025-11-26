@@ -2,68 +2,99 @@ import sys
 import numpy as np
 from mpmath import mp
 import scipy.stats as st
+from scipy.optimize import curve_fit
+from scipy.special import gamma as gamma_func
 
 # Set the desired precision for calculations 
 mp.dps = 10 # dps = decimal places
 
-# Check if arguments were provided 
-if len(sys.argv) != 4:
-    print("Usage: python calculate_fit.py <mean> <variance> <output_filepath>")
+# --- Parámetros de Ajuste ---
+N_BINS_FOR_FIT = 50 
+PERCENTILE_TO_IGNORE = 30.0 # <-- Ignora el 20% inferior del eje X
+
+# --- MODIFIED: Expect file paths ---
+if len(sys.argv) != 3:
+    print("Usage: python calculate_fit.py <input_data_filepath> <output_filepath_base>")
     sys.exit(1)
 
 # Get parameters from command line 
-# sys.argv[0] is the script name itself
-# sys.argv[1] is the first argument, sys.argv[2] the second
-mu = float(sys.argv[1])
-sigma2 = float(sys.argv[2])
-base_path = sys.argv[3]
+data_path = sys.argv[1]
+base_path = sys.argv[2]
 
-# Compute k and theta (Method of Moments, rounded version)
-term = 4 * sigma2 - mu**2
-if term <= 0:
-  print(f"Error: 4*sigma2 - mu**2 is not positive. Cannot calculate k and theta.")
-  exit()
+print(f"Loading raw data from {data_path}...")
+try:
+    # 1. Cargar datos
+    data = np.loadtxt(data_path)
+    data = data[data > 1e-9] 
+    if len(data) == 0:
+        raise ValueError("No valid data points found after filtering.")
 
-# Calculate k as a float first
-k_float = (5 * mu**2) / term
-#k_float = 6
-# Apply conditional rounding
-if k_float > 0.9:
-    k = round(k_float)
-    print(f"Calculated k ({k_float:.4f}) > 0.9, rounding to integer {k}.")
-else:
-    k = k_float
-    print(f"Calculated k ({k_float:.4f}) <= 0.9, keeping as float.")
+    # 2. Construir el histograma
+    y_data, bin_edges = np.histogram(data, bins=N_BINS_FOR_FIT, density=True)
+    x_data = (bin_edges[:-1] + bin_edges[1:]) / 2.0
 
-# Calculate theta using the final k
-if k == 0:
-    print(f"Error: Final k is 0. Cannot calculate theta.")
-    exit()
-theta = 1.5*mu / k
+    # --- 3. NUEVO: Filtrar los datos del histograma ---
+    # Encontrar el umbral del 20% en el eje X (q)
+    # (Usamos el percentil de los *datos crudos*, que es más robusto)
+    x_min_threshold = np.percentile(data, PERCENTILE_TO_IGNORE)
+    
+    # Crear una máscara para los datos del histograma (x_data)
+    fit_mask = (x_data > x_min_threshold)
+    
+    x_fit = x_data[fit_mask]
+    y_fit = y_data[fit_mask]
+    
+    if len(x_fit) < 2:
+        raise ValueError(f"Not enough data points left to fit after filtering at {PERCENTILE_TO_IGNORE}th percentile.")
+        
+    print(f"Fitting on histogram bins where q > {x_min_threshold:.2e} (ignoring bottom {PERCENTILE_TO_IGNORE}%)")
 
-print(f"Received parameters: mu={mu}, sigma2={sigma2}")
-print(f"Calculated parameters: k = {k}, theta = {theta}")
+    # 4. Definir la función a la que queremos ajustar
+    def gamma_pdf_for_fit(x, k, theta):
+        if k <= 0 or theta <= 0:
+            return np.full_like(x, np.inf)
+        x_safe = np.clip(x, 1e-30, None)
+        return (1.0 / (gamma_func(k) * (theta**k))) * (x_safe**(k-1)) * np.exp(-x_safe/theta)
+
+    # 5. Adivinar parámetros iniciales (MoM, usando todos los datos)
+    mu_guess = np.mean(data)
+    var_guess = np.var(data)
+    k_guess = mu_guess**2 / var_guess
+    theta_guess = var_guess / mu_guess
+
+    print("Fitting Gamma PDF using Least-Squares on filtered histogram...")
+    # 6. Ejecutar el ajuste de mínimos cuadrados (¡solo en los datos filtrados!)
+    popt, pcov = curve_fit(gamma_pdf_for_fit, x_fit, y_fit, p0=[k_guess, theta_guess])
+    
+    k, theta = popt
+    mu = k * theta
+    sigma2 = k * (theta**2)
+    print(f"Least-Squares Fit: k = {k:.4f}, theta = {theta:.4f}")
+
+except Exception as e:
+    print(f"An error occurred: {e}. Exiting.")
+    sys.exit(1)
+# --- END OF MODIFICATION ---
 
 
 # Define functions g(q) and f(q) 
 def g(q, k, theta):
     return (1.0 / float(mp.gamma(k)) / theta**k) * q**(k-1) * np.exp(-q/theta)
     
-
 def f(q, k, theta):
+    if k <= 1: return 0.0
     return float(mp.gammainc(k - 1, a=q/theta)) / (float(mp.gamma(k)) * theta)
 
 # Generate the points for the curve 
-# Determine a good range for based on the mean and variance
-q_max = mu + 3 * np.sqrt(sigma2)
-q_values = np.linspace(q_max / 500.0, q_max, 500) # Start from a small positive number
+# Usamos la media y varianza de los datos *originales* para el rango del gráfico
+q_max = np.mean(data) + 3 * np.std(data)
+q_values = np.linspace(q_max / 500.0, q_max, 500) 
 
-# Create an empty array to store the results
+# ... (El resto del script para rellenar p_values y guardar, es idéntico) ...
 p_values = np.zeros_like(q_values)
 g_values = np.zeros_like(q_values)
 f_values = np.zeros_like(q_values)
 
-# Loop through each q value and calculate P(q) individually
 for i, q in enumerate(q_values):
     g_val = g(q, k, theta)
     f_val = f(q, k, theta)
@@ -71,9 +102,8 @@ for i, q in enumerate(q_values):
     f_values[i] = f_val
     p_values[i] = (1.0/3.0) * g_val + (2.0/3.0) * f_val
 
-# Save results
 np.savetxt(f"{base_path}_P_fit.dat", np.column_stack((q_values, p_values)), header="q P(q)")
 np.savetxt(f"{base_path}_g_fit.dat", np.column_stack((q_values, g_values)), header="q g(q)")
 np.savetxt(f"{base_path}_f_fit.dat", np.column_stack((q_values, f_values)), header="q f(q)")
 
-print(f"Analytical curve data saved to {base_path}_*.dat files") 
+print(f"Analytical curve data saved to {base_path}_*.dat files")

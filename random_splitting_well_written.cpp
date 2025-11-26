@@ -1,4 +1,7 @@
 #include "myfunctions.h"
+#include "Rand.h"
+#include "graph_theory.h"
+
 #include <vector>
 #include <fstream>
 #include <cmath>
@@ -6,8 +9,6 @@
 #include <random>
 #include <iostream>
 #include <cstdlib>
-#include "Rand.h"
-#include "graph_theory.h"
 #include <filesystem>
 #include <map>
 #include <functional>
@@ -18,12 +19,12 @@ struct Params
     std::string filename;
     int nreals = 1;
     int nbins = 50;
-    int randomize_flag = 0;
+    int randomize_flag = 0; // 0: Real weights, 1: Random weights
     std::string coords_file = "";
-    int pbc_flag = 0;
+    int pbc_flag = 0;       // 0: Open loop, 1: Periodic Boundary Conditions
 };
 
-RNG Rand;
+RNG Rand; // global RNG
 
 void fix_disorder(Graph& G);
 Params read_params(int argc, char** argv);
@@ -31,138 +32,12 @@ void initialize_flows(Graph& G);
 void dfs_sum_products( std::size_t current_node_idx, double current_product, const Graph& G_original, const std::vector<bool>& is_big_tube, std::map<size_t, double>& target_weights, std::vector<bool>& visited);
 Graph create_big_tubes_graph(const Graph& G_original);
 void create_output_directory(const std::string& dir_path);
+void create_all_plots(const std::string& output_dir, const std::string& base_name_tubes, const std::string& base_name_pores, const std::string& analytical_base_name, double mu, double sigma2);
+void save_inlet_outlet_coordinates(const Graph& G, const std::string& output_dir);
+double Pearson_correlation(const std::vector<double>& pair_products, const std::vector<double>& series_1, const std::vector<double>& series_2);
+void save_k_data(const std::string& filename, const std::vector<std::size_t>& k_values, const std::vector<double>& y_values, const std::vector<double>& y_errors);
+void save_node_layers(const Graph& G, const std::string& filename);
 
-
-// Creates a Gnuplot script to plot simulation vs. analytical data.
-void create_all_plots(const std::string& output_dir, const std::string& base_name_tubes, const std::string& base_name_pores, const std::string& analytical_base_name, double mu, double sigma2) 
-{
-    // Derive the other histogram filenames automatically
-    std::string big_in_tubes_hist_file = "big_in_" + base_name_tubes;
-    std::string big_out_tubes_hist_file = "big_out_" + base_name_tubes;
-    std::string small_in_tubes_hist_file = "small_in_" + base_name_tubes;
-    std::string small_out_tubes_hist_file = "small_out_" + base_name_tubes;
-
-    // SCRIPT 1: The main plot with P(q) and Alim fit 
-    {
-        std::string script_path = output_dir + "tube_flow_dist_plot.gp";
-        std::ofstream gpout(script_path);
-        
-        gpout << "# --- Main Plot: Simulation vs. Full Analytical Fit and Gamma (Alim) Fit ---" << std::endl;
-        gpout << "reset" << std::endl;
-        
-        // Alim Fit parameters (Standard Gamma from moments)
-        gpout << "k_alim = (" << mu << "**2) / " << sigma2 << std::endl;
-        gpout << "theta_alim = " << sigma2 << " / " << mu << std::endl;
-        gpout << "GammaPDF(x) = (1.0/(gamma(k_alim)*theta_alim**k_alim)) * x**(k_alim-1) * exp(-x/theta_alim)" << std::endl;
-        
-        gpout << "set terminal wxt size 900,600 enhanced" << std::endl;
-        gpout << "set title 'Full Distribution vs. Fits'" << std::endl;
-        gpout << "set xlabel 'Flow Rate (q)'" << std::endl;
-        gpout << "set ylabel 'Probability Density'" << std::endl;
-        
-        gpout << "plot '" << base_name_tubes << "' u 2:3 with linespoints title 'All Tubes Data', \\" << std::endl;
-        gpout << "     '" << analytical_base_name << "_P_fit.dat' with lines lw 2 title 'P(q) Analytical Fit', \\" << std::endl;
-        gpout << "     GammaPDF(x) with lines lw 2 dashtype 2 title 'Alim Fit (Gamma PDF)'" << std::endl;
-        gpout.close();
-        std::cout << "Gnuplot script saved to " << script_path << std::endl;
-    }
-
-    // SCRIPT 2: Big tubes vs. f(q)
-    {
-        std::string script_path = output_dir + "big_tube_flow_dist_plot.gp";
-        std::ofstream gpout(script_path);
-
-        gpout << "# --- Big Tubes Plot: Simulation vs. f(q) component ---" << std::endl;
-        gpout << "set xlabel 'Flow rate (q)'" << std::endl;
-        gpout << "set ylabel 'Probability density'" << std::endl;
-
-        gpout << "plot '" << big_in_tubes_hist_file << "' u 2:3 with linespoints title 'Big-in tubes data', \\" << std::endl;
-        gpout << "     '" << big_out_tubes_hist_file << "' u 2:3 with linespoints title 'Big-out tubes data', \\" << std::endl;
-        gpout << "     '" << base_name_pores << "' u 2:3 with linespoints title 'Pore data', \\" << std::endl;
-        gpout << "     '" << analytical_base_name << "_g_fit.dat' with lines lw 2 title 'Model fit'" << std::endl;
-        gpout.close();
-        std::cout << "Gnuplot script saved to " << script_path << std::endl;
-    }
-
-    // SCRIPT 3: Small tubes vs. g(q) 
-    {
-        std::string script_path = output_dir + "small_tube_flow_dist_plot.gp";
-        std::ofstream gpout(script_path);
-
-        gpout << "# Small Tubes Plot: Simulation vs. g(q) component" << std::endl;
-        gpout << "set xlabel 'Flow rate (q)'" << std::endl;
-        gpout << "set ylabel 'Probability density'" << std::endl;
-
-        gpout << "plot '" << small_in_tubes_hist_file << "' u 2:3 with linespoints title 'Small-in tubes data', \\" << std::endl;
-        gpout << "     '" << small_out_tubes_hist_file << "' u 2:3 with linespoints title 'Small-out tubes data', \\" << std::endl;
-        gpout << "     '" << analytical_base_name << "_f_fit.dat' with lines lw 2 title 'Model prediction'" << std::endl;
-        gpout.close();
-        std::cout << "Gnuplot script saved to " << script_path << std::endl;
-    }
-}
-
-void save_inlet_outlet_coordinates(const Graph& G, const std::string& output_dir)
-{
-    // Save Inlet Coordinates
-    std::string inlet_filename = output_dir + "inlet_coordinates.dat";
-    std::ofstream fout_in(inlet_filename);
-    if(!fout_in) std::cerr << "Error: Unable to open file: " << inlet_filename << std::endl;
-    else 
-    {
-        for(std::size_t node_id : G.inlet) 
-        {
-            fout_in << node_id;
-            for (double coord : G.nodes[node_id].coordinates) fout_in << " " << coord;
-            fout_in << std::endl;
-        }
-        fout_in.close();
-        std::cout << "Inlet coordinates saved to " << inlet_filename << std::endl;
-    }
-
-    // Save Outlet Coordinates
-    std::string outlet_filename = output_dir + "outlet_coordinates.dat";
-    std::ofstream fout_out(outlet_filename);
-    if(!fout_out) std::cerr << "Error: Unable to open file: " << outlet_filename << std::endl;
-    else 
-    {
-        for(std::size_t node_id : G.outlet) 
-        {
-            fout_out << node_id;
-            for (double coord : G.nodes[node_id].coordinates) fout_out << " " << coord;
-            fout_out << std::endl;
-        }
-        fout_out.close();
-        std::cout << "Outlet coordinates saved to " << outlet_filename << std::endl;
-    }
-}
-
-double Pearson_correlation(const std::vector<double>& pair_products, const std::vector<double>& series_1, const std::vector<double>& series_2)
-{
-    double pair_products_mean, trash, mean_1, mean_2, var_1, var_2, covariance;
-    myfun::med_var(series_1, mean_1, var_1);
-    myfun::med_var(series_2, mean_2, var_2);
-    myfun::med_var(pair_products, pair_products_mean, trash);
-
-    covariance = pair_products_mean - mean_1*mean_2;
-    return covariance/std::sqrt(var_1)/std::sqrt(var_2);
-}
-
-void save_k_data(const std::string& filename, const std::vector<std::size_t>& k_values, const std::vector<double>& y_values, const std::vector<double>& y_errors)
-{
-    std::ofstream fout(filename);
-    if(!fout) 
-    {
-        std::cerr << "Error: Unable to open file: " << filename << std::endl;
-        return;
-    }
-
-    fout << "# k\tvalue\tstd_error_of_mean\n";
-    for(std::size_t i = 0; i < k_values.size(); ++i) 
-        fout << k_values[i] << "\t" << y_values[i] << "\t" << y_errors[i] << "\n";
-    
-    fout.close();
-    std::cout << "k-dependent data saved to " << filename << std::endl;
-}
 
 int main(int argc, char** argv){
 
@@ -171,8 +46,20 @@ int main(int argc, char** argv){
     std::cout << "nbins = " << p.nbins << std::endl << "nreals = " << p.nreals << std::endl;
 
     // Create output directory:
-    const std::string output_dir = "output/";
+    std::string base_folder = "output";
+    if(p.pbc_flag == 1) base_folder += "_PBC";
+    if(p.randomize_flag == 0) base_folder += "_01";
+    else base_folder += "_02";
+
+    const std::string output_dir = base_folder + "/";
     create_output_directory(output_dir);
+
+    std::cout << "Running simulation with:" << std::endl;
+    std::cout << "  Input File: " << p.filename << std::endl;
+    std::cout << "  Output Dir: " << output_dir << std::endl;
+    std::cout << "  Realizations: " << p.nreals << ", Bins: " << p.nbins << std::endl;
+    std::cout << "  Randomize Weights: " << (p.randomize_flag ? "YES" : "NO") << std::endl;
+    std::cout << "  PBC: " << (p.pbc_flag ? "YES" : "NO") << std::endl;
 
     // We read the graph from its list of links:
     Graph G(p.filename, p.coords_file);
@@ -180,6 +67,14 @@ int main(int argc, char** argv){
     // Check if the graph is a DAG
     bool is_dag = G.is_DAG();
     std::cout << "Graph is a DAG: " << (is_dag ? "true" : "false") << std::endl;
+
+    // Apply randomization immediately if requested (for consistency in k-analysis)
+    if(p.randomize_flag == 1) 
+    {
+        std::cout << "Applying randomization..." << std::endl;
+        fix_disorder(G);      // Cambia los pesos en G.links
+        G.refresh_weights();  // Actualiza la matriz de Eigen A^1 con los nuevos pesos
+    }
 
     
 
@@ -234,6 +129,9 @@ int main(int argc, char** argv){
     std::cout << "Max out-degree = " << max_out_degree << std::endl;
     std::cout << "Min out-degree = " << min_out_degree << std::endl;
 
+    G.compute_distances_from_inlet();
+    save_node_layers(G, output_dir + "node_layers.dat");
+
 
     // We compute some statistics about order-k neighbours:
     std::cout << "\n--- STARTING K-ORDER ANALYSIS LOOP ---" << std::endl;
@@ -266,10 +164,7 @@ int main(int argc, char** argv){
         }
     }
 
-    // We don't need the global means, but good to have
-    double mass_mean, mass_var, evenness_mean, evenness_var;
-    myfun::med_var(mass_values, mass_mean, mass_var);
-    myfun::med_var(evenness_values, evenness_mean, evenness_var);
+
 
     
     std::vector<std::vector<std::size_t>> out_dist_hist;
@@ -420,6 +315,7 @@ int main(int argc, char** argv){
     
     // We compute the stationary flows for p.nreals realizations of the disorder (weights):
     std::vector<double> mass_series, mass_1_series, mass_2_series;
+    std::vector<double> evenness_series;
     std::vector<double> flow_series, big_in_flow_series, big_out_flow_series, small_in_flow_series, small_out_flow_series; 
     double minflow, maxflow;
     bool use_pbc = (p.pbc_flag == 1);
@@ -438,6 +334,11 @@ int main(int argc, char** argv){
             mass_series.push_back(pore.mass);
             if(pore.state == 1) mass_1_series.push_back(pore.mass);
             if(pore.state == 2) mass_2_series.push_back(pore.mass);
+            if(pore.outnbrs.size() == 2) 
+            {
+                double ev = 2.0 * std::min(pore.outwgs[0], pore.outwgs[1]);
+                evenness_series.push_back(ev);
+            }
         }
         
         //We collect flow-rate data at tubes:
@@ -458,7 +359,6 @@ int main(int argc, char** argv){
 
     // Calculate the mean and variance of the raw data
     double flow_mean, flow_variance;
-    // Esta primera llamada era solo para imprimir, pero se sobrescribía
     myfun::med_var(flow_series, flow_mean, flow_variance); 
     std::cout << "Calculated from data: mean = " << flow_mean << ", variance = " << flow_variance << std::endl;
 
@@ -467,20 +367,101 @@ int main(int argc, char** argv){
     
     std::string  analytical_base_path = output_dir + "analytical";
     
-    // --- ¡ESTA ES LA PARTE IMPORTANTE! ---
-    // Aquí calculabas la media y varianza de 'mass_series'
-    myfun::med_var(flow_series, flow_mean, flow_variance, 99.5);
+    /* double mass_mean, mass_variance, mass_skewness;
+    myfun::med_var(mass_series, mass_mean, mass_variance); 
+    std::cout << "Calculated from data: mean = " << mass_mean << ", variance = " << mass_variance << std::endl;
+    std::string command = "python calculate_fit.py " + std::to_string(mass_mean) + " " + std::to_string(mass_variance) + " " + analytical_base_path; 
+     */
+
+    std::string raw_data_path = output_dir + "raw_data_for_fit.tmp";
+    std::ofstream raw_out(raw_data_path);
+   
+    for (double val : mass_series) raw_out << val << "\n";
+    raw_out.close();
+    std::cout << "Raw data saved to " << raw_data_path << std::endl;
+    std::string command = "python calculate_fit.py " + raw_data_path + " " + analytical_base_path; 
     
-    // Y aquí se las pasabas a Python
-    std::string command = "python calculate_fit.py " + std::to_string(flow_mean) + " " + std::to_string(flow_variance) + " " + analytical_base_path; 
     
     // Execute the command
     int result = system(command.c_str());
-    if (result != 0) 
-        std::cerr << "Warning: Python script may have failed." << std::endl;
-   
+    if(result != 0) std::cerr << "Warning: Python script may have failed." << std::endl;
 
     
+    std::cout << "\n--- Computing intra-layer statistics ---" << std::endl;
+
+    // Group data by layer (topological distance to inlet)
+    // layer_masses[d] = vector containing masses of all nodes at distance d
+    // layer_evenness[d] = vector containing evenness of splitters at distance d
+    std::map<int, std::vector<double>> layer_masses;
+    std::map<int, std::vector<double>> layer_evenness;
+
+    for(const auto& node : G.nodes)
+    {
+        int d = node.dist_to_inlet;
+        if(d < 0) continue; // ignore unreachable nodes
+
+        // Save mass (for all nodes in this layer)
+        layer_masses[d].push_back(node.mass);
+
+        // Save evenness (only if the node is a splitter)
+        if(node.outnbrs.size() == 2) 
+        {
+            double ev = 2.0 * std::min(node.outwgs[0], node.outwgs[1]);
+            layer_evenness[d].push_back(ev);
+        }
+    }
+
+    // 2. Calculate "Correlation" (Homogeneity/CV)
+    // NOTE: Calculating "correlation between nodes in the same layer" is tricky 
+    // because there are no defined pairs. Instead, we measure HOMOGENEITY.
+    // The standard measure is the Coefficient of Variation (CV = sigma / mu).
+    // - If nodes behave identically (perfect correlation), CV = 0.
+    // - If the layer is very heterogeneous (channeling), CV is high.
+    
+    std::vector<double> dist_vec, cv_mass_vec, cv_evenness_vec;
+    std::vector<double> mean_mass_vec, mean_evenness_vec;
+
+    for (auto const& [d, masses] : layer_masses)
+    {
+        // Mass Statistics
+        double mu_m, var_m;
+        if(masses.size() > 1) 
+        {
+            myfun::med_var(masses, mu_m, var_m); // Using your library
+            // CV = std_dev / mean
+            double cv_m = (mu_m > 1e-20) ? (std::sqrt(var_m) / mu_m) : 0.0;
+            
+            // Evenness Statistics (there might not be splitters in this layer)
+            double mu_e = 0.0, var_e = 0.0, cv_e = 0.0;
+            if(layer_evenness.count(d) && layer_evenness[d].size() > 1) 
+            {
+                myfun::med_var(layer_evenness[d], mu_e, var_e);
+                cv_e = (mu_e > 1e-20) ? (std::sqrt(var_e) / mu_e) : 0.0;
+            }
+
+            dist_vec.push_back(static_cast<double>(d));
+            cv_mass_vec.push_back(cv_m);
+            cv_evenness_vec.push_back(cv_e);
+            mean_mass_vec.push_back(mu_m);
+            mean_evenness_vec.push_back(mu_e);
+        }
+    }
+
+    // Save statistics to file
+    std::string layer_stats_file = output_dir + "layer_statistics.dat";
+    std::ofstream fout_layers(layer_stats_file);
+    fout_layers << "# distance cv_mass cv_evenness mean_mass mean_evenness\n";
+    for(std::size_t i = 0; i < dist_vec.size(); ++i) 
+    {
+        fout_layers << dist_vec[i] << "\t" 
+                    << cv_mass_vec[i] << "\t" 
+                    << cv_evenness_vec[i] << "\t"
+                    << mean_mass_vec[i] << "\t"
+                    << mean_evenness_vec[i] << "\n";
+    }
+    fout_layers.close();
+    std::cout << "Layer statistics saved to " << layer_stats_file << std::endl;
+   
 
     // Compute correspoinding histograms
     std::string tube_hist_filename = "tube_flow_dist.dat";
@@ -500,6 +481,9 @@ int main(int argc, char** argv){
     myfun::guardaHistograma(histogram, minflow, delta, output_dir + "small_in_tube_flow_dist.dat");
     histogram = myfun::buildHistogram(small_out_flow_series, p.nbins, minflow, maxflow, delta);
     myfun::guardaHistograma(histogram, minflow, delta, output_dir + "small_out_tube_flow_dist.dat");
+    auto hist_even = myfun::buildHistogram(evenness_series, p.nbins, minflow, maxflow, delta);
+    myfun::guardaHistograma(hist_even, minflow, delta, output_dir + "evenness_dist.dat");
+    
 
     // Checking mass conservation: we display total inlet mass vs. total outlet mass
     double inlet_mass, outlet_mass;
@@ -753,5 +737,165 @@ void create_output_directory(const std::string& dir_path)
         // Exit the program, as the output directory is essential
         std::exit(1); 
     }
+}
+
+void create_all_plots(const std::string& output_dir, const std::string& base_name_tubes, const std::string& base_name_pores, const std::string& analytical_base_name, double mu, double sigma2) 
+{
+    // Derive the other histogram filenames automatically
+    std::string big_in_tubes_hist_file = "big_in_" + base_name_tubes;
+    std::string big_out_tubes_hist_file = "big_out_" + base_name_tubes;
+    std::string small_in_tubes_hist_file = "small_in_" + base_name_tubes;
+    std::string small_out_tubes_hist_file = "small_out_" + base_name_tubes;
+
+    // SCRIPT 1: The main plot with P(q) and Alim fit 
+    {
+        std::string script_path = output_dir + "tube_flow_dist_plot.gp";
+        std::ofstream gpout(script_path);
+        
+        gpout << "# --- Main Plot: Simulation vs. Full Analytical Fit and Gamma (Alim) Fit ---" << std::endl;
+        gpout << "reset" << std::endl;
+        
+        // Alim Fit parameters (Standard Gamma from moments)
+        gpout << "k_alim = (" << mu << "**2) / " << sigma2 << std::endl;
+        gpout << "theta_alim = " << sigma2 << " / " << mu << std::endl;
+        gpout << "GammaPDF(x) = (1.0/(gamma(k_alim)*theta_alim**k_alim)) * x**(k_alim-1) * exp(-x/theta_alim)" << std::endl;
+        
+        gpout << "set terminal wxt size 900,600 enhanced" << std::endl;
+        gpout << "set title 'Full Distribution vs. Fits'" << std::endl;
+        gpout << "set xlabel 'Flow Rate (q)'" << std::endl;
+        gpout << "set ylabel 'Probability Density'" << std::endl;
+        
+        gpout << "plot '" << base_name_tubes << "' u 2:3 with linespoints title 'All Tubes Data', \\" << std::endl;
+        gpout << "     '" << analytical_base_name << "_P_fit.dat' with lines lw 2 title 'P(q) Analytical Fit', \\" << std::endl;
+        gpout << "     GammaPDF(x) with lines lw 2 dashtype 2 title 'Alim Fit (Gamma PDF)'" << std::endl;
+        gpout.close();
+        std::cout << "Gnuplot script saved to " << script_path << std::endl;
+    }
+
+    // SCRIPT 2: Big tubes vs. f(q)
+    {
+        std::string script_path = output_dir + "big_tube_flow_dist_plot.gp";
+        std::ofstream gpout(script_path);
+
+        gpout << "# --- Big Tubes Plot: Simulation vs. f(q) component ---" << std::endl;
+        gpout << "set xlabel 'Flow rate (q)'" << std::endl;
+        gpout << "set ylabel 'Probability density'" << std::endl;
+
+        gpout << "plot '" << big_in_tubes_hist_file << "' u 2:3 with linespoints title 'Big-in tubes data', \\" << std::endl;
+        gpout << "     '" << big_out_tubes_hist_file << "' u 2:3 with linespoints title 'Big-out tubes data', \\" << std::endl;
+        gpout << "     '" << base_name_pores << "' u 2:3 with linespoints title 'Pore data', \\" << std::endl;
+        gpout << "     '" << analytical_base_name << "_g_fit.dat' with lines lw 2 title 'Model fit'" << std::endl;
+        gpout.close();
+        std::cout << "Gnuplot script saved to " << script_path << std::endl;
+    }
+
+    // SCRIPT 3: Small tubes vs. g(q) 
+    {
+        std::string script_path = output_dir + "small_tube_flow_dist_plot.gp";
+        std::ofstream gpout(script_path);
+
+        gpout << "# Small Tubes Plot: Simulation vs. g(q) component" << std::endl;
+        gpout << "set xlabel 'Flow rate (q)'" << std::endl;
+        gpout << "set ylabel 'Probability density'" << std::endl;
+
+        gpout << "plot '" << small_in_tubes_hist_file << "' u 2:3 with linespoints title 'Small-in tubes data', \\" << std::endl;
+        gpout << "     '" << small_out_tubes_hist_file << "' u 2:3 with linespoints title 'Small-out tubes data', \\" << std::endl;
+        gpout << "     '" << analytical_base_name << "_f_fit.dat' with lines lw 2 title 'Model prediction'" << std::endl;
+        gpout.close();
+        std::cout << "Gnuplot script saved to " << script_path << std::endl;
+    }
+}
+
+void save_inlet_outlet_coordinates(const Graph& G, const std::string& output_dir)
+{
+    // Save Inlet Coordinates
+    std::string inlet_filename = output_dir + "inlet_coordinates.dat";
+    std::ofstream fout_in(inlet_filename);
+    if(!fout_in) std::cerr << "Error: Unable to open file: " << inlet_filename << std::endl;
+    else 
+    {
+        for(std::size_t node_id : G.inlet) 
+        {
+            fout_in << node_id;
+            for (double coord : G.nodes[node_id].coordinates) fout_in << " " << coord;
+            fout_in << std::endl;
+        }
+        fout_in.close();
+        std::cout << "Inlet coordinates saved to " << inlet_filename << std::endl;
+    }
+
+    // Save Outlet Coordinates
+    std::string outlet_filename = output_dir + "outlet_coordinates.dat";
+    std::ofstream fout_out(outlet_filename);
+    if(!fout_out) std::cerr << "Error: Unable to open file: " << outlet_filename << std::endl;
+    else 
+    {
+        for(std::size_t node_id : G.outlet) 
+        {
+            fout_out << node_id;
+            for (double coord : G.nodes[node_id].coordinates) fout_out << " " << coord;
+            fout_out << std::endl;
+        }
+        fout_out.close();
+        std::cout << "Outlet coordinates saved to " << outlet_filename << std::endl;
+    }
+}
+
+double Pearson_correlation(const std::vector<double>& pair_products, const std::vector<double>& series_1, const std::vector<double>& series_2)
+{
+    double pair_products_mean, trash, mean_1, mean_2, var_1, var_2, covariance;
+    myfun::med_var(series_1, mean_1, var_1);
+    myfun::med_var(series_2, mean_2, var_2);
+    myfun::med_var(pair_products, pair_products_mean, trash);
+
+    covariance = pair_products_mean - mean_1*mean_2;
+    return covariance/std::sqrt(var_1)/std::sqrt(var_2);
+}
+
+void save_k_data(const std::string& filename, const std::vector<std::size_t>& k_values, const std::vector<double>& y_values, const std::vector<double>& y_errors)
+{
+    std::ofstream fout(filename);
+    if(!fout) 
+    {
+        std::cerr << "Error: Unable to open file: " << filename << std::endl;
+        return;
+    }
+
+    fout << "# k\tvalue\tstd_error_of_mean\n";
+    for(std::size_t i = 0; i < k_values.size(); ++i) 
+        fout << k_values[i] << "\t" << y_values[i] << "\t" << y_errors[i] << "\n";
+    
+    fout.close();
+    std::cout << "k-dependent data saved to " << filename << std::endl;
+}
+
+void save_node_layers(const Graph& G, const std::string& filename)
+{
+    std::ofstream fout(filename);
+    if(!fout) 
+    {
+        std::cerr << "Error: Unable to open file: " << filename << std::endl;
+        return;
+    }
+
+    // Header for Python (pandas)
+    fout << "id x y distance\n";
+
+    for(std::size_t i = 0; i < G.nodes.size(); ++i)
+    {
+        const auto& node = G.nodes[i];
+        
+        // Only save nodes that have valid coordinates
+        // We also save nodes with distance -1 (unreachable) so Python can see them
+        if (!node.coordinates.empty() && node.coordinates.size() >= 2)
+        {
+            fout << i << " " 
+                 << node.coordinates[0] << " " 
+                 << node.coordinates[1] << " " 
+                 << node.dist_to_inlet << "\n";
+        }
+    }
+    fout.close();
+    std::cout << "Node layer data saved to " << filename << std::endl;
 }
 
