@@ -12,113 +12,156 @@
 
 namespace myfun {
 
-    std::vector<double> buildHistogram(std::vector<double>& data, std::size_t numBins, double& minValOut, double& maxValOut, double& delta, double percentile )
+    std::vector<double> buildHistogram(std::vector<double>& input_data, std::size_t numBins, double& minValOut, double& maxValOut, double& delta, double percentile)
     {
-        if(data.empty()) throw std::runtime_error("buildHistogram: Data vector is empty!");
+        if(input_data.empty()) throw std::runtime_error("buildHistogram: Data vector is empty!");
         if(numBins == 0) throw std::runtime_error("buildHistogram: numBins cannot be 0!");
 
-        // Sort the vector ONCE
-        // This is the main O(N log N) operation.
+        // 1. FILTRADO Y COPIA (Sanitize Data)
+        // Ignoramos NaNs e Infs que rompen el cálculo del rango.
+        std::vector<double> data;
+        data.reserve(input_data.size());
+        for(double v : input_data) {
+            if(std::isfinite(v)) {
+                data.push_back(v);
+            }
+        }
+
+        if(data.empty()) {
+            // Si todos eran NaN/Inf, devolvemos un histograma vacío o de ceros.
+            minValOut = 0.0; maxValOut = 0.0; delta = 1.0;
+            return std::vector<double>(numBins, 0.0);
+        }
+
+        // 2. ORDENAR
         std::sort(data.begin(), data.end());
 
-        //Get Min and Max (now O(1) operations)
-        
-        // Min is simply the first element
+        // 3. OBTENER RANGO (Percentiles)
         minValOut = data.front();
+        //std::cout << "MIN = " << minValOut << std::endl;
         
-        // Find the percentile index (with the off-by-one fix)
-        std::size_t percentile_index;
-        if (percentile >= 1.0) percentile_index = data.size() - 1; 
-        else 
-        {
-            if (percentile < 0.0) percentile_index = 0;
-            else percentile_index = static_cast<std::size_t>(data.size() * percentile);
-        }
+        std::size_t p_index;
+        if (percentile >= 1.0) p_index = data.size() - 1;
+        else if (percentile <= 0.0) p_index = 0;
+        else p_index = static_cast<std::size_t>(data.size() * percentile);
 
-        if (percentile_index >= data.size()) percentile_index = data.size() - 1; // safeguard
-        
-        // Max (for the histogram) is just the element at that index
-        // No nth_element needed!
-        maxValOut = data[percentile_index]; 
-        
+        // Safety clamp
+        if (p_index >= data.size()) p_index = data.size() - 1;
+
+        maxValOut = data[p_index];
         double range = maxValOut - minValOut;
+        //std::cout << "max = " << maxValOut << std::endl;
+        //std::cout << "range = " << range << std::endl;
 
-        // Discrete Data Logic (Quantum)
-        // The vector is already sorted, so this is fast (O(N))
-        double quantum = std::numeric_limits<double>::max();
-        if(data.size() > 1) 
-        {
-            for(std::size_t i = 1; i < data.size(); ++i) 
-            {
-                double diff = data[i] - data[i-1];
-                // Check if diff is a real difference and within the histogram range
-                if(diff > 1e-10 && data[i] <= maxValOut) quantum = std::min(quantum, diff);   
-            }
-        }
-        
-        if(quantum == std::numeric_limits<double>::max() || quantum < 1e-10) 
-        {
-             quantum = range / (numBins * 2.0); // Treat as continuous
-             if(quantum < 1e-10) quantum = 1e-10; 
-        }
 
-        // Calculate effective_numbins 
-        std::size_t effective_numbins;
-        double standard_width = range / numBins;
-        
-        if(range < 1e-10) effective_numbins = 1;
-        else 
-        {
-            if(quantum > standard_width) 
-            {
-                // Discrete data case
-                effective_numbins = static_cast<std::size_t>(std::round(range / quantum)) + 1;
-                if (effective_numbins == 0) effective_numbins = 1; 
-                delta = quantum;
-            } 
-            else
-            {
-                effective_numbins = numBins; // continuous data
-                delta = standard_width;
+        // 4. GESTIÓN DE RANGO NULO O MUY PEQUEÑO (Singularidad)
+        // Usamos una tolerancia basada en la magnitud de los datos
+        double magnitude = std::max(std::abs(minValOut), std::abs(maxValOut));
+        double tolerance = std::max(magnitude * 1e-14, 1e-100); // 1e-100 para evitar underflow absoluto
+
+        // Si el rango es casi cero (ej: todos los datos son iguales), forzamos un bin ficticio.
+        if(range <= tolerance) {
+            delta = tolerance; // Evitar división por cero
+            std::vector<double> histogram(1, 0.0);
+            
+            // Contamos cuántos datos caen en este "punto único"
+            double count = 0.0;
+            for(double v : data) {
+                if(v <= maxValOut + tolerance && v >= minValOut - tolerance) count += 1.0;
             }
             
+            // Densidad brutal (Dirac): Count / (N * dx)
+            // Nota: Si dx es minúsculo, esto da un número gigante. Es matemáticamente correcto para una Delta.
+            if(data.size() > 0) histogram[0] = count / (data.size() * delta);
+            return histogram;
+
+            //std::cout << "El rango es menor que la tolerancia. Al diablo " << std::endl;
+
         }
 
-        // Fill Histogram 
-        std::vector<double> histogram(effective_numbins, 0);
-        double effective_data_size = 0.0;
+        // 5. DETECCIÓN DE DATOS DISCRETOS ("Quantum")
+        // Solo vale la pena buscar quantum si el rango es pequeño o los datos son enteros/similares.
+        double quantum = std::numeric_limits<double>::max();
+        // Heurística: revisamos una muestra o todo si es pequeño, para no perder tiempo O(N) si N es gigante.
+        // Pero como ya ordenamos, es O(N) barato.
+        for(std::size_t i = 1; i < data.size(); ++i) {
+            double diff = data[i] - data[i-1];
+            if(diff > tolerance && data[i] <= maxValOut) {
+                if(diff < quantum) quantum = diff;
+            }
+        }
+
+        //std::cout << "La diferencia minima entre dos valores es  = " << quantum << std::endl;
+
+
+        // Decisión: ¿Es discreto o continuo?
+        double standard_width = range / numBins;
+        std::size_t effective_numbins = numBins;
+        //std::cout << "La 'standard width' es = " << standard_width << std::endl;
+
         
-        if(range < 1e-10) 
-        { 
-            // Handle min == max
-             histogram[0] = data.size();
-             return histogram;
+        // Si el salto más pequeño entre datos es mayor que el ancho de bin estándar,
+        // entonces el histograma "continuo" mentiría interpolando vacíos. Pasamos a modo discreto.
+        if(quantum < std::numeric_limits<double>::max() && quantum > standard_width) {
+            // Caso Discreto
+            double bins_needed = std::round(range / quantum);
+            // Limitamos para no crear millones de bins si hay un outlier raro
+            if(bins_needed < 10000) { 
+                effective_numbins = static_cast<std::size_t>(bins_needed) + 1;
+                delta = quantum;
+                //std::cout << "Deberiamos hacer el tratamiento cuantico y nos lo podemos permitir." << std::endl;
+                //std::cout << "Usaremos este numero de bines: " << effective_numbins << std::endl;
+
+
+            } else {
+                delta = standard_width; // Fallback a continuo si pide demasiada memoria
+                //std::cout << "Deberiamos hacer el tratamiento cuantico pero es muy caro. Fuck it." << std::endl;
+            }
+        } else {
+            // Caso Continuo
+            delta = standard_width;
+            //std::cout << "Esto es mas continuo que mis huevos un domingo." << std::endl;
+
         }
 
-        // We iterate over the 'data' vector (which is now sorted)
-        for(auto val : data)
-        {
-            // Stop iterating once we pass the max value
-            if(val > maxValOut) break;
+        // 6. LLENADO DEL HISTOGRAMA
+        std::vector<double> histogram(effective_numbins, 0.0);
+        double counted_elements = 0.0;
 
-            if(val >= minValOut) // We know val >= minValOut due to sort
-            {
-                double ratio = (val - minValOut) / range;
-                std::size_t binIndex = static_cast<std::size_t>(ratio * effective_numbins);
-                if(binIndex == effective_numbins)  binIndex = effective_numbins - 1;
+        for(double val : data) {
+            // Importante: Si percentile < 1.0, ignoramos lo que esté fuera del rango superior
+            if(val > maxValOut) break; 
+            
+            if(val >= minValOut) {
+                // Cálculo del índice protegido contra errores de punto flotante
+                double ratio = (val - minValOut) / delta;
+                
+                // floor es más seguro que cast directo para negativos (aunque aquí ordenamos)
+                // Usamos un pequeño epsilon para corregir errores numéricos en el borde exacto
+                std::size_t binIndex = static_cast<std::size_t>(std::floor(ratio + 1e-14));
+                
+                if(binIndex >= effective_numbins) binIndex = effective_numbins - 1;
                 
                 histogram[binIndex] += 1.0;
-                effective_data_size += 1.0;
-            }   
+                counted_elements += 1.0;
+            }
         }
 
-        // Normalization 
-        double dx = range / effective_numbins;
-        if (effective_data_size > 0 && dx > 0) 
-            for(auto &bin : histogram) bin /= (effective_data_size * dx);
+        // 7. NORMALIZACIÓN (Densidad de Probabilidad)
+        // PDF: Sum(hist * delta) = 1.0
+        // hist[i] = count / (N_total * delta)
+        // Usamos data.size() como N_total para que la integral sobre TODO el dominio sea 1.
+        // Si usáramos 'counted_elements', la integral sobre el rango recortado sería 1 (PDF condicional).
+        // Generalmente en física queremos la PDF global.
+        //std::cout << "delta = " << delta << std::endl;
+        double norm_factor = data.size() * delta;
+        if(norm_factor > 0) {
+            for(auto& bin : histogram) bin /= norm_factor;
+        }
 
         return histogram;
     }
+
 
     std::vector<double> twoDHistogram(
         const std::vector<double>& data1,

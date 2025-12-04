@@ -29,6 +29,7 @@ struct Node
     std::vector<std::size_t> outnbrs, innbrs, outlnks, inlnks; ///list of outnbrs and innbrs labels
     std::vector<double> outwgs, inwgs;
     int dist_to_inlet = -1;
+    int dist_to_outlet = -1;
     
 };
 
@@ -475,10 +476,11 @@ public:
         while (std::getline(fin, line)) 
         {
             line_num++;
+            if(line.empty() || line[0] == '#') continue;
             std::stringstream ss(line);
 
             // Read Node ID
-            if (!(ss >> node_id)) throw std::runtime_error("Error reading node ID from line " + std::to_string(line_num) + " in " + filename);
+            if (!(ss >> node_id)) continue;
             if (node_id >= nodes.size()) throw std::runtime_error("Error: Node ID " + std::to_string(node_id) + " from coordinate file is out of bounds (max is " + std::to_string(nodes.size() - 1) + ").");
         
             // Clear previous coordinates and read new ones
@@ -566,6 +568,43 @@ public:
         }
         std::cout << "Distance computation complete." << std::endl;
     }
+
+    void compute_distances_to_outlet()
+    {
+        std::cout << "Computing topological distances to outlet..." << std::endl;
+
+        std::queue<std::size_t> q;
+        
+        // Reset and Initialize
+        for(auto& node : nodes) node.dist_to_outlet = -1; 
+        
+        for(std::size_t outlet_idx : outlet) 
+        {
+            nodes[outlet_idx].dist_to_outlet = 0;
+            q.push(outlet_idx);
+        }
+
+        // Run Backward BFS
+        while(!q.empty())
+        {
+            std::size_t u = q.front();
+            q.pop();
+            int d = nodes[u].dist_to_outlet;
+
+            // Traverse UPSTREAM (using in-neighbors)
+            for(std::size_t v : nodes[u].innbrs)
+            {
+                if(nodes[v].dist_to_outlet == -1) // If unvisited
+                {
+                    nodes[v].dist_to_outlet = d + 1;
+                    q.push(v);
+                }
+            }
+        }
+        std::cout << "Outlet distance computation complete." << std::endl;
+    }
+
+
 
     void refresh_weights()
     {
@@ -930,7 +969,18 @@ public:
         std::size_t i, j;
         double weight;
 
-        while(fin >> i >> j >> weight) add_link(i, j, weight);
+        std::string line;
+        while(std::getline(fin, line)) 
+        {
+            if(line.empty() || line[0] == '#') continue;
+            
+            std::stringstream ss(line);
+            // we try to read 3 values. If it doesnt work (because it is a header), next
+            if(!(ss >> i >> j >> weight)) continue;
+
+            add_link(i, j, weight);
+        }
+        
         fin.close();
 
         check_and_renormalize_weights(); // Enforce K1L
