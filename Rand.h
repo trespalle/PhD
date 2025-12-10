@@ -53,6 +53,41 @@ public:
 
     }
 
+    double gamma(double k=2.0, double theta=1.0)
+    {
+        // Case k < 1: we use the "boosting" trick
+        if(k < 1.0)
+        {
+            // we generate Gamma(1+k) and adjust with uniform^(1/k)
+            double u = (*this)();
+            return gamma(1.0 + k, theta) * std::pow(u, 1.0 / k);
+        }
+
+        // Casr k >= 1: Marsaglia and Tsang method
+        double d = k - 1.0 / 3.0;
+        double c = 1.0 / std::sqrt(9.0 * d);
+        double Z, V, U;
+
+        while(true)
+        {
+            Z = this->norm(0.0, 1.0); // 
+            V = 1.0 + c * Z;
+
+            if (V <= 0.0) continue;
+
+            V = V * V * V; 
+            U = (*this)(); 
+
+            // Quick acceptance condition (Squeeze check)
+            if (U < 1.0 - 0.0331 * (Z * Z) * (Z * Z)) 
+                return d * V * theta;
+
+            // Precise acceptance condition (Logarithmic)
+            if (std::log(U) < 0.5 * Z * Z + d * (1.0 - V + std::log(V)))
+                return d * V * theta;
+        }  
+    }
+
 };
 
 #endif

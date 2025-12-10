@@ -7,158 +7,404 @@
 #include <iomanip>
 #include <filesystem> 
 #include "pore_networks.h"
-#include "myfunctions.h" 
+#include "myfunctions.h"
+#include "Rand.h"   
 
 namespace fs = std::filesystem;
+
+void randomize_network_weights(PoreNetwork& PN)
+{
+    std::cout << "  -> Randomizing splitting fractions (Null Model U(0,1))..." << std::endl;
+    
+    RNG rng(123456789); 
+
+    for(std::size_t i = 0; i < PN.nodes.size(); ++i) 
+    {
+        auto& node = PN.nodes[i];
+        std::size_t k = node.outlnks.size();
+        
+        if(k == 0) continue; // Outlet or dead-end
+
+        std::vector<double> new_weights(k);
+
+        // RANDOMIZATION LOGIC
+        if(k == 1) 
+        {
+            new_weights[0] = 1.0;
+        }
+        else if(k == 2)
+        {
+            // Binary split: w and 1-w using your RNG
+            double w = rng(); 
+            new_weights[0] = w;
+            new_weights[1] = 1.0 - w;
+        }
+        else 
+        {
+            // General case k > 2
+            double sum = 0.0;
+            for(std::size_t j=0; j<k; ++j) 
+            {
+                new_weights[j] = rng(); // Llamada al operator() de tu clase
+                sum += new_weights[j];
+            }
+            // Normalize
+            if(sum > 1e-9) for(std::size_t j=0; j<k; ++j) new_weights[j] /= sum;
+            else for(std::size_t j=0; j<k; ++j) new_weights[j] = 1.0/k;   
+        }
+
+        // SYNCHRONIZATION (update node lists aND links list) 
+        for(std::size_t j=0; j<k; ++j) 
+        {
+            double w = new_weights[j];
+            std::size_t link_idx = node.outlnks[j];
+            std::size_t neighbor = node.outnbrs[j];
+
+            // Update node outgoing weight
+            node.outwgs[j] = w;
+
+            // Update global link list
+            PN.links[link_idx].weight = w;
+
+            // Update neighbor incoming weight
+            bool found_link = false;
+            for(std::size_t m=0; m < PN.nodes[neighbor].inlnks.size(); ++m) 
+            {
+                if(PN.nodes[neighbor].inlnks[m] == link_idx) 
+                {
+                    PN.nodes[neighbor].inwgs[m] = w;
+                    found_link = true;
+                    break;
+                }
+            }
+            if(!found_link) std::cerr << "Warning: Sync issue at node " << i << " link " << link_idx << std::endl;
+        }
+    }
+    
+    // Refresh internal Eigen matrix for robustness
+    PN.refresh_weights();
+    std::cout << "Randomization complete and synchronized using Mersenne Twister." << std::endl;
+}
+
+// Helper to save Linear histograms (for Weights/Fractions 0-1)
+void save_histogram(const std::vector<double>& data, const std::string& filename, const std::string& out_dir, bool use_abs = true) 
+{
+    if(data.empty()) return;
+    
+    // Create a local copy to process (abs) and sort (inside buildHistogram)
+    std::vector<double> data_processed;
+    data_processed.reserve(data.size());
+
+    if (use_abs) 
+    {
+        // Apply absolute value to all elements
+        for(double val : data) data_processed.push_back(std::abs(val));
+    } 
+    else 
+    {
+        // Just copy raw values
+        data_processed = data;
+    }
+
+    double min_val, max_val, delta;
+    
+    // Assuming myfun::buildHistogram sorts the vector in-place and bins it
+    auto h = myfun::buildHistogram(data_processed, 25, min_val, max_val, delta, 0.995);
+    
+    myfun::guardaHistograma(h, min_val, delta, out_dir + filename);
+    std::cout << "  Saved " << filename << (use_abs ? " (Abs Values)" : " (Raw Values)") << std::endl;
+}
+
+void test_gamma_implementation(const std::string& out_dir)
+{
+    std::cout << "\n[TEST] Verifying Custom Gamma RNG (Marsaglia & Tsang)..." << std::endl;
+    
+    // Arbitrary Theoretical Parameters
+    double k_shape = 0.5; 
+    double theta_scale = 1.5;
+    
+    double theo_mean = k_shape * theta_scale;           // 2.5 * 1.5 = 3.75
+    double theo_var  = k_shape * theta_scale * theta_scale; // 2.5 * 2.25 = 5.625
+
+    std::cout << "  Parameters: Shape (k)=" << k_shape << ", Scale (theta)=" << theta_scale << std::endl;
+    std::cout << "  Theoretical: Mean=" << theo_mean << ", Variance=" << theo_var << std::endl;
+
+    // 2. Massive Sampling
+    std::size_t N = 1000000; // 1 million points
+    std::vector<double> samples;
+    samples.reserve(N);
+
+    RNG rng(12345); // Fixed seed for reproducibility
+
+    for(std::size_t i = 0; i < N; ++i)
+    {
+        // Calling the manual gamma implementation
+        samples.push_back(rng.gamma(k_shape, theta_scale)); 
+    }
+
+    // 3. Statistical Calculation
+    double samp_mean = 0.0, samp_var = 0.0;
+    myfun::med_var(samples, samp_mean, samp_var, 100.0);
+
+    std::cout << "  Sample (N=1e6): Mean=" << samp_mean << ", Variance=" << samp_var << std::endl;
+    
+    // Relative Error
+    double err_mean = std::abs(samp_mean - theo_mean) / theo_mean * 100.0;
+    double err_var = std::abs(samp_var - theo_var) / theo_var * 100.0;
+    std::cout << "  Error: Mean " << std::fixed << std::setprecision(4) << err_mean << "%, Var " << err_var << "%" << std::endl;
+
+    // 4. Save Histogram for Gnuplot verification
+    save_histogram(samples, "test_gamma_distribution.dat", out_dir, false); 
+}
 
 int main(int argc, char** argv) 
 {
     std::cout << "==========================================" << std::endl;
-    std::cout << "      PORE NETWORK CONSISTENCY CHECK      " << std::endl;
+    std::cout << "      PORE NETWORK COMPLETE ANALYSIS      " << std::endl;
     std::cout << "==========================================" << std::endl;
 
-    // 0. PREPARE OUTPUT
     std::string output_dir = "check_output/";
-    try {
-        if (!fs::exists(output_dir)) {
-            fs::create_directories(output_dir);
-        }
-    } catch (const std::exception& e) {
-        std::cerr << "Error creating directory: " << e.what() << std::endl;
-        return 1;
-    }
+    if (!fs::exists(output_dir)) fs::create_directories(output_dir);
 
-    // 1. DEFINE FILE SCHEMAS & LOAD
-    // We read Weight, Width and FlowRate from links (columns 3, 4, 5)
-    std::vector<LinkData> link_fmt = { 
-        LinkData::Weight, 
-        LinkData::HalfWidth, 
-        LinkData::FlowRate 
-    };
-
-    // We read Pressure from nodes (column 3, after ID, X, Y)
-    std::vector<NodeData> node_fmt = { 
-        NodeData::Pressure 
-    };
-
+    // Define file schemas
+    std::vector<LinkData> link_fmt = { LinkData::Weight, LinkData::HalfWidth, LinkData::FlowRate };
+    std::vector<NodeData> node_fmt = { NodeData::Pressure };
     std::string link_file = "junction_links.txt";
     std::string coord_file = "junction_coordinates.txt";
 
-    std::cout << "Loading network from " << link_file << " and " << coord_file << "..." << std::endl;
+    // =======================================================================
+    // PHASE 1: LOADING EXPERIMENTAL TOPOLOGY & "REAL/GEOMETRIC" DATA
+    // =======================================================================
+    std::cout << "\n[PHASE 1] Loading Experimental Topology & Data..." << std::endl;
+    PoreNetwork PN(link_file, coord_file, link_fmt, node_fmt, 2);
+
+    // Save REAL histograms (directly from file)
+    // -----------------------------------------------------
+    // Real half-widths (a_exp) 
+    save_histogram(PN.effective_halfwidths, "hist_halfwidth_exp.dat", output_dir);
+
+    // print some statistics:
+    double mean_exp = 0.0, var_exp = 0.0;
+    myfun::med_var(PN.effective_halfwidths, mean_exp, var_exp, 99.5); 
+    std::cout << "  [STATS EXP] Halfwidth -> Mean: " << mean_exp << " | Variance: " << var_exp << std::endl;
+    // -----------------------------
     
-    // Load topology and experimental data (Q and P)
-    // '2' indicates 2D coordinates (skip X, Y before reading Pressure)
-    PoreNetwork PN(link_file, coord_file, link_fmt, node_fmt, 2); 
+    // Real splitting fractions (weights)
+    // We assume the weights loaded from file are the "real" ones.
+    std::vector<double> real_weights;
+    for(const auto& l : PN.links) real_weights.push_back(l.weight);
+    save_histogram(real_weights, "hist_splitting_fractions_exp.dat", output_dir);
 
-    std::cout << "\n[Topology Loaded]" << std::endl;
-    std::cout << "  Nodes:   " << PN.nodes.size() << std::endl;
-    std::cout << "  Links:   " << PN.links.size() << std::endl;
-    std::cout << "  Inlets:  " << PN.inlet.size() << std::endl;
-    std::cout << "  Outlets: " << PN.outlet.size() << std::endl;
+    // Q_exp and dP_exp (for reference)
+    PN.update_pressure_drops(); // Ensure cache is updated
+    save_histogram(PN.flows, "hist_flow_rate_exp.dat", output_dir);
+    save_histogram(PN.pressure_drops, "hist_pressure_drop_exp.dat", output_dir);
 
-
-    // 2. INITIAL CHECKS (Pressure & Mass Balance)
-    // -------------------------------------------------------
+    // Calculate GEOMETRIC conductances (g_geom) -> Requested in point (2)
+    // ----------------------------------------------------------------------
+    // We use Hele-Shaw model with H=1mm on the REAL apertures we just loaded.
+    std::cout << "\n[PHASE 1b] Calculating geometric conductances (Hele-Shaw)..." << std::endl;
+    PN.set_geometric_conductances_from_geometry(ModelType::HeleShaw, 0.001); // H = 1mm
     
-    // 2a. Check Pressure Uniformity at Boundaries
-    auto check_pressure_stats = [&](const std::vector<std::size_t>& nodes, std::string label) {
-        if(nodes.empty()) return;
-        double min_p = 1e200, max_p = -1e200, sum_p = 0.0;
-        for(auto id : nodes) {
-            double p = PN.pressures[id];
-            if(p < min_p) min_p = p;
-            if(p > max_p) max_p = p;
-            sum_p += p;
-        }
-        double avg = sum_p / nodes.size();
-        std::cout << "  " << label << " Pressure: " 
-                  << "Min=" << min_p << ", Max=" << max_p << ", Avg=" << avg << " Pa" << std::endl;
-    };
+    // Save histogram (to compare with g_eff later)
+    save_histogram(PN.geometric_conductances, "hist_conductance_geom.dat", output_dir);
 
-    std::cout << "\n[Boundary Pressure Check (Experimental Data)]" << std::endl;
-    check_pressure_stats(PN.inlet, "Inlet");
-    check_pressure_stats(PN.outlet, "Outlet");
 
-    // 2b. Check Global Flow Balance
-    // Calculate total flow entering/leaving the network boundaries
+    // =======================================================================
+    // PHASE 2: INVERSE PROBLEM (EFFECTIVE CALIBRATION)
+    // =======================================================================
+    std::cout << "\n[PHASE 2] Inverse problem: calculating effective conductances..." << std::endl;
+    
+    // IMPORTANT: This overwrites the geometric conductances calculated above
+    // with the "effective" ones derived from Q_exp / dP_exp.
+    // Ensure your function uses the Q and P currently loaded.
+    PN.init_physics_from_experimental_data(); 
+
+    // Save EFFECTIVE conductances (g_eff) 
+    save_histogram(PN.geometric_conductances, "hist_conductance_eff.dat", output_dir);
+
+    // Calculate EFFECTIVE half-widths (a_eff)
+    // -------------------------------------------------------------------
+    // We invert the Hele-Shaw model using the current effective conductances.
+    std::cout << "          Back-calculating effective halfwidths..." << std::endl;
+    PN.calculate_halfwidths_from_geometric_conductances(ModelType::HeleShaw, 0.001);
+
+    // Save histogram a_eff
+    save_histogram(PN.effective_halfwidths, "hist_halfwidth_eff.dat", output_dir);
+
+    // print some statistics
+    double mean_eff = 0.0, var_eff = 0.0;
+    myfun::med_var(PN.effective_halfwidths, mean_eff, var_eff, 99.5);
+    std::cout << "  [STATS EFF] Halfwidth -> Mean: " << mean_eff << " | Variance: " << var_eff << std::endl;
+    // -----------------------------
+
+
+    // =======================================================================
+    // PHASE 3: FORWARD SIMULATION (DIRECT PROBLEM)
+    // =======================================================================
+    std::cout << "\n[PHASE 3] Forward simulation using effective conductances..." << std::endl;
+
+    // Calculate target flow rate (average of experimental Inlet/Outlet)
     double total_inlet_Q = 0.0;
-    for (std::size_t id : PN.inlet) {
-        for (std::size_t link_idx : PN.nodes[id].outlnks) {
-            // We sum absolute values of flow on boundary links
-            total_inlet_Q += std::abs(PN.flows[link_idx]);
-        }
-    }
-
+    for (std::size_t id : PN.inlet) 
+        for (std::size_t l_idx : PN.nodes[id].outlnks) total_inlet_Q += std::abs(PN.flows[l_idx]);
+    
     double total_outlet_Q = 0.0;
-    for (std::size_t id : PN.outlet) {
-        for (std::size_t link_idx : PN.nodes[id].inlnks) {
-            total_outlet_Q += std::abs(PN.flows[link_idx]);
-        }
-    }
-    
-    // We will use the average of In/Out as the target for the re-simulation
+    for (std::size_t id : PN.outlet) 
+        for (std::size_t l_idx : PN.nodes[id].inlnks) total_outlet_Q += std::abs(PN.flows[l_idx]);
+
     double avg_Q_target = (total_inlet_Q + total_outlet_Q) / 2.0;
-    
-    std::cout << "\n[Global Mass Balance Check (Experimental Data)]" << std::endl;
-    std::cout << "  Total Inlet Flow:  " << total_inlet_Q << " m^3/s" << std::endl;
-    std::cout << "  Total Outlet Flow: " << total_outlet_Q << " m^3/s" << std::endl;
-    std::cout << "  -> Target Q for Simulation: " << avg_Q_target << " m^3/s" << std::endl;
+    std::cout << "  Target Q: " << avg_Q_target << " m^3/s" << std::endl;
 
-
-    // 3. INVERSE PROBLEM: Calculate Effective Conductances
-    // -------------------------------------------------------
-    // Use loaded Q and P to calibrate g_geom = (Q*mu)/dP for every tube.
-    // This populates PN.geometric_conductances based on the experimental reality.
-    std::cout << "\n[Inverse Problem: Calibrating Conductances]" << std::endl;
-    PN.init_physics_from_experimental_data();
-
-
-    // 4. SAVE INITIAL HISTOGRAMS (Experimental Data)
-    // -------------------------------------------------------
-    std::cout << "\n[Saving Experimental Histograms]" << std::endl;
-    
-    std::size_t nbins = 50;
-    double min_val, max_val, delta; 
-
-    // Helper lambda for histogram saving using 'myfun' namespace
-    auto save_histogram = [&](const std::vector<double>& data, std::string name) {
-        if(data.empty()) return;
-        // Convert to absolute values for log-plotting consistency
-        std::vector<double> abs_data;
-        abs_data.reserve(data.size());
-        for(double v : data) abs_data.push_back(std::abs(v));
-
-        // Build histogram (Note: buildHistogram sorts the input vector, so we pass the copy 'abs_data')
-        auto h = myfun::buildHistogram(abs_data, nbins, min_val, max_val, delta, 0.99); 
-        myfun::guardaHistograma(h, min_val, delta, output_dir + name);
-        std::cout << "  Saved " << name << std::endl;
-    };
-
-    save_histogram(PN.geometric_conductances, "hist_conductance.dat");
-    save_histogram(PN.pressure_drops, "hist_pressure_drop_exp.dat");
-    save_histogram(PN.flows, "hist_flow_rate_exp.dat");
-
-
-    // 5. FORWARD PROBLEM: Re-simulate Flow
-    // -------------------------------------------------------
-    // Now we forget the read pressures and flows.
-    // We calculate a new equilibrium field based ONLY on the conductances we just calibrated.
-    // We impose the 'avg_Q_target' we calculated in step 2b.
-    
-    std::cout << "\n[Forward Problem: Re-simulating Flow Field]" << std::endl;
-    
-    // Use FixedFlowRate (Neumann at inlet) to match the experimental condition
+    // Solve the flow field (this updates flows, pressures, and weights)
+    // NOTE: We are using the g_eff calculated in Phase 2 (currently in memory).
     PN.solve_flow_field(BoundaryCondition::FixedFlowRate, avg_Q_target);
 
+    // Save Simulation Results
+    save_histogram(PN.flows, "hist_flow_rate_sim.dat", output_dir);
+    save_histogram(PN.pressure_drops, "hist_pressure_drop_sim.dat", output_dir);
 
-    // 6. SAVE FINAL HISTOGRAMS (Simulated Data)
-    // -------------------------------------------------------
-    std::cout << "\n[Saving Simulated Histograms]" << std::endl;
+    // Save simulated splitting Fractions 
+    std::vector<double> sim_weights;
+    for(const auto& l : PN.links) sim_weights.push_back(l.weight);
+    save_histogram(sim_weights, "hist_splitting_fractions_sim.dat", output_dir);
 
-    // Conductances haven't changed, so we only save the new dynamic variables
-    save_histogram(PN.pressure_drops, "hist_pressure_drop_sim.dat");
-    save_histogram(PN.flows, "hist_flow_rate_sim.dat");
 
-    std::cout << "\nCheck finished. Outputs saved to '" << output_dir << "'" << std::endl;
+    // =============================================
+    // PHASE 4: TOPOLOGICAL INVERSE PROBLEM (MaxEnt) 
+    // =============================================
+    std::cout << "\n[PHASE 4] Topological inverse problem (pure splitting fractions)..." << std::endl;
+    
+    // CRITICAL: We reload the network from scratch.
+    // Why? Because 'solve_flow_field' in Phase 3 modified the link weights 
+    // based on the physical flow physics. We want to use the "real" (file) 
+    // topological weights for this prediction.
+    PoreNetwork PN_topo(link_file, coord_file, link_fmt, node_fmt, 2);
+
+    // We need to define boundary pressures for the topological method.
+    // We will use the average of the experimental pressures (loaded at start in PN_topo 
+    // from the file).
+    double P_in_avg = 0.0;
+    if(!PN_topo.inlet.empty()) 
+    {
+        for(auto id : PN_topo.inlet) P_in_avg += PN_topo.pressures[id];
+        P_in_avg /= PN_topo.inlet.size();
+    }
+
+    double P_out_avg = 0.0;
+    if(!PN_topo.outlet.empty()) 
+    {
+        for(auto id : PN_topo.outlet) P_out_avg += PN_topo.pressures[id];
+        P_out_avg /= PN_topo.outlet.size();
+    }
+
+    std::cout << "  Using avg P_in=" << P_in_avg << " and P_out=" << P_out_avg << " for topology initialization." << std::endl;
+
+    // Execute Topological Algorithm using the NEW method signature
+    // 1. Calculates Q based on topological weights (Mass Balance)
+    // 2. Calculates P based on Laplacian (Harmonic Field)
+    // 3. Calibrates g based on Q/dP
+    PN_topo.init_physics_from_splitting_fractions(avg_Q_target, P_in_avg, P_out_avg);
+
+    // Save Topological Histograms
+    // Note: The method already updates the pressure_drops cache internally, 
+    // so the vectors are ready to use.
+    save_histogram(PN_topo.geometric_conductances, "hist_conductance_topo.dat", output_dir);
+    save_histogram(PN_topo.flows, "hist_flow_rate_topo.dat", output_dir);
+    save_histogram(PN_topo.pressure_drops, "hist_pressure_drop_topo.dat", output_dir);
+    
+    // Optional: Calculate widths from these topological conductances if needed
+    PN_topo.calculate_halfwidths_from_geometric_conductances(ModelType::HeleShaw, 0.001);
+    save_histogram(PN_topo.effective_halfwidths, "hist_halfwidth_topo.dat", output_dir);
+
+
+    // =======================================================================
+    // PHASE 5: NULL MODEL (RANDOM SPLITTING FRACTIONS)
+    // =======================================================================
+    std::cout << "\n[PHASE 5] Null Model: Random splitting fractions (independent U(0,1))..." << std::endl;
+
+    // Reload clean network structure
+    PoreNetwork PN_rand(link_file, coord_file, link_fmt, node_fmt, 2);
+
+    // Randomize weights using
+    randomize_network_weights(PN_rand);
+
+    // Save the generated random distribution
+    std::vector<double> rand_weights;
+    for(const auto& l : PN_rand.links) rand_weights.push_back(l.weight);
+    save_histogram(rand_weights, "hist_splitting_fractions_rand.dat", output_dir);
+
+    // Solve inverse problem (same boundary conditions as phase 4)
+    PN_rand.init_physics_from_splitting_fractions(avg_Q_target, P_in_avg, P_out_avg);
+
+    // Save null model histograms
+    save_histogram(PN_rand.geometric_conductances, "hist_conductance_rand.dat", output_dir);
+    save_histogram(PN_rand.flows, "hist_flow_rate_rand.dat", output_dir);
+    save_histogram(PN_rand.pressure_drops, "hist_pressure_drop_rand.dat", output_dir);
+    PN_rand.calculate_halfwidths_from_geometric_conductances(ModelType::HeleShaw, 0.001);
+    save_histogram(PN_rand.effective_halfwidths, "hist_halfwidth_rand.dat", output_dir);
+
+    // =======================================================================
+    // PHASE 6: SYNTHETIC MODEL (SAMPLED GAMMA HALFWIDTHS)
+    // =======================================================================
+    std::cout << "\n[PHASE 6] Synthetic Model: Sampling halfwidths from Gamma..." << std::endl;
+
+    // USER CONFIGURATION
+    // normalized_variance = Variance / Mean^2 = 1/k
+    double user_normalized_var = 1.0/4.0; 
+    std::cout << "  User Target: Normalized Variance (1/k) = " << user_normalized_var << std::endl;
+    
+    // Calculate gamma parameters
+    // mean_eff calculated in Phase 2
+    if(mean_eff <= 1e-12) 
+    {
+        std::cerr << "Error: mean_eff is too close to zero. Cannot generate Gamma." << std::endl;
+        return 1;
+    }
+    double k_gamma = 1.0 / user_normalized_var;
+    double theta_gamma = mean_eff / k_gamma;
+
+    std::cout << "  Derived Gamma Params: k=" << k_gamma << ", theta=" << theta_gamma << std::endl;
+
+    // Load topology
+    PoreNetwork PN_synth(link_file, coord_file, link_fmt, node_fmt, 2);
+
+    // Sample new halfwidths
+    RNG rng_synth(123456789);
+    
+    for(std::size_t i = 0; i < PN_synth.links.size(); ++i)
+    {
+        // Sample from Gamma(k, theta)
+        double w = rng_synth.gamma(k_gamma, theta_gamma);
+        
+        // Safety: width must be > 0. If 0 is sampled (rare but possible), clamp it.
+        if(w < 1e-15) w = 1e-15;
+
+        PN_synth.effective_halfwidths[i] = w;
+    }
+    save_histogram(PN_synth.effective_halfwidths, "hist_halfwidth_synthetic.dat", output_dir);
+
+    // Calculate conductance from these synthetic widths
+    std::cout << "  Calculating conductances from synthetic widths..." << std::endl;
+    PN_synth.set_geometric_conductances_from_geometry(ModelType::HeleShaw, 0.001);
+    save_histogram(PN_synth.geometric_conductances, "hist_conductance_synthetic.dat", output_dir);
+
+    // Solve direct problem (forward simulation)
+    // We reuse the same target flow rate (avg_Q_target)
+    std::cout << "  Solving flow field for synthetic network..." << std::endl;
+    PN_synth.solve_flow_field(BoundaryCondition::FixedFlowRate, avg_Q_target);
+
+    // Save resulting histograms
+    save_histogram(PN_synth.flows, "hist_flow_rate_synthetic.dat", output_dir);
+    save_histogram(PN_synth.pressure_drops, "hist_pressure_drop_synthetic.dat", output_dir);
+
+    // Extract resulting splitting fractions (generated by the physics of the random widths)
+    std::vector<double> synth_weights;
+    for(const auto& l : PN_synth.links) synth_weights.push_back(l.weight);
+    save_histogram(synth_weights, "hist_splitting_fractions_synthetic.dat", output_dir);
+
+    // THE END
+
+    std::cout << "\n[SUCCESS] All requested histograms (Phase 1-6) saved to " << output_dir << std::endl;
     return 0;
 }

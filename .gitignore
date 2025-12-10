@@ -1,0 +1,42 @@
+# --- Archivos de Compilación de C++ ---
+*.o
+*.obj
+*.exe
+*.dll
+*.so
+*.dylib
+*.a
+*.lib
+
+# --- Carpetas de Build (CMake) ---
+# Aquí es donde suelen estar esos 10k archivos basura
+build/
+bin/
+out/
+debug/
+release/
+x64/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+
+# --- Librerías Externas ---
+# Si Eigen está copiada dentro de tu proyecto y no quieres subirla:
+eigen/
+Eigen/
+eigen3/
+
+# --- Archivos temporales de VS Code ---
+.vscode/
+*.code-workspace
+
+# --- Archivos de Salida de tus simulaciones ---
+# Probablemente no quieras subir gigas de datos a GitHub
+check_output/
+scaling_output/
+*.dat
+*.txt
+# (Excepción: si quieres subir los txt de input, pon un '!' delante)
+!junction_links.txt
+!junction_coordinates.txt

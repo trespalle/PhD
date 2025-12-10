@@ -462,6 +462,7 @@ public:
             }
         }
     }
+    
 
     void read_coordinates(const std::string& filename)
     {

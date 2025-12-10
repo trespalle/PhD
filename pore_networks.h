@@ -118,7 +118,7 @@ public:
             std::size_t u = links[i].in;
             std::size_t v = links[i].out;
             // Store norm of  drop consistent with link direction u->v
-            pressure_drops[i] = pressures[v] - pressures[u];
+            pressure_drops[i] = pressures[u] - pressures[v];
         }
         std::cout << "Pressure drops (Delta P) cache updated." << std::endl;
     }
@@ -249,7 +249,7 @@ public:
                 }
 
                 switch(format[k]) {
-                    case LinkData::Weight: links[link_idx].weight = val; break;
+                    //case LinkData::Weight: links[link_idx].weight = val; break;
                     case LinkData::HalfWidth: effective_halfwidths[link_idx] = val; break;
                     case LinkData::FlowRate: flows[link_idx] = val; break;
                     case LinkData::Ignored: break;
@@ -364,7 +364,7 @@ public:
     }
 
     // Inverse of the above: Calculates geometric semi-aperture (a) from permeability
-    void calculate_widths_from_geometric_conductances(ModelType model, double H_meters = 0.001)
+    void calculate_halfwidths_from_geometric_conductances(ModelType model, double H_meters = 0.001)
     {
         double R_const = H_meters / std::sqrt(12.0);
 
@@ -495,7 +495,7 @@ public:
             if(nodes[u].innbrs.empty()) Q_base_inlet += q;
         }
 
-        // --- 4. Determine Scaling Factor ---
+        // Determine scaling factor 
         double scale_factor = 0.0;
 
         if (bc_type == BoundaryCondition::FixedFlowRate)
@@ -531,18 +531,63 @@ public:
                 total_inlet_flow += flows[l];
         }
 
+        // 6. UPDATE WEIGHTS AND NODAL MASSES (OPTIMIZATION)
+        // -------------------------------------------------
+        // Reset masses first
+        for(auto& node : nodes) node.mass = 0.0;
+
+        for(std::size_t i = 0; i < N; ++i) 
+        {
+            double total_out_flow = 0.0;
+            double total_in_flow = 0.0;
+
+            // Sum outgoing flows
+            for(std::size_t l_idx : nodes[i].outlnks) 
+            {
+                if(flows[l_idx] > 0) total_out_flow += flows[l_idx];
+            }
+            
+            // Sum incoming flows
+            for(std::size_t l_idx : nodes[i].inlnks)
+            {
+                if(flows[l_idx] > 0) total_in_flow += flows[l_idx];
+            }
+
+            // --- MASS CALCULATION ---
+            // For internal nodes: In = Out. For boundaries, take the non-zero side.
+            if (nodes[i].innbrs.empty())      nodes[i].mass = total_out_flow; // Inlet
+            else                              nodes[i].mass = total_in_flow;  // Bulk & Outlet
+
+            // Normalize Mass (so sum(inlet_mass) = 1.0)
+            if(total_inlet_flow > 1e-20) nodes[i].mass /= total_inlet_flow; 
+
+            // Update Topological Weights (Splitting Fractions)
+            for(std::size_t k = 0; k < nodes[i].outlnks.size(); ++k) 
+            {
+                std::size_t l_idx = nodes[i].outlnks[k];
+                double w = 0.0;
+                
+                if(total_out_flow > 1e-20) 
+                    w = std::max(0.0, flows[l_idx]) / total_out_flow;
+                
+                links[l_idx].weight = w;
+                nodes[i].outwgs[k] = w;
+            }
+        }
+        
+        // Sync Eigen matrix for consistency
+        refresh_weights();
+
         // Post-Processing 
-        std::cout << "Flow field solved." << std::endl;
+        std::cout << "Flow field solved. Nodal masses and weights updated directly." << std::endl; 
         if(bc_type == BoundaryCondition::FixedFlowRate)
             std::cout << "  Condition: Fixed Flow = " << target_value << " m^3/s" << std::endl;
         else
             std::cout << "  Condition: Fixed DeltaP = " << target_value << " Pa" << std::endl;
             
         std::cout << "  Resulting Total Flow: " << total_inlet_flow << " m^3/s" << std::endl;
-
         // Important: Update caches
         update_pressure_drops();        // Update the DeltaP cache vector
-        update_graph_weights_from_flows(); // Update graph weights for transport
     }
     
 
@@ -646,73 +691,150 @@ public:
         //calculate_widths_from_geometric_conductances(ModelType::Poiseuille);
     }
 
-    // Calculates geometric conductances using Topological MaxEnt
-    // Assumes pressure drop distributes evenly per topological step
+    // Calculates geometric conductances using splitting fractions (for Q) 
+    // and harmonic/laplacian interpolation (for P).
+    // This guarantees smooth pressure fields and avoids negative pressure drops.
     void init_physics_from_splitting_fractions(double Q_total, double P_in, double P_out) 
     {
-        std::cout << "Initializing: Interpreting link weights as SPLITTING FRACTIONS (MaxEnt)..." << std::endl;
+        std::cout << "Initializing: Laplacian topological method..." << std::endl;
         
-        // 1. Get Flows Q from weights
-        // Use parent graph solver to propagate mass fractions
-        RNG temp_rng; 
-        compute_stationary_flows(temp_rng, false);
+        // FIRST: CALCULATE FLOWS (Q) FROM WEIGHTS 
+        // We propagate mass through the network using the original splitting fractions.
 
+        if(inlet.empty()) 
+        {
+            std::cerr << "Error: No inlet nodes found for topological flow." << std::endl;
+            return;
+        }
+        double mass_per_inlet = 1.0 / inlet.size();
+        for(std::size_t id : inlet) nodes[id].mass = mass_per_inlet;
+    
+        
+        // Use parent Graph mass solver:
+        RNG temp_rng; 
+        compute_stationary_flows(temp_rng, false); // Calculates 'nodes[i].mass'
+
+        // Convert nodal mass to link flows
+        // Q_link = Mass_node * Q_total * weight_link
+        flows.assign(links.size(), 0.0);
         for(std::size_t i = 0; i < nodes.size(); ++i) 
         {
             double node_throughput = nodes[i].mass * Q_total;
             for(std::size_t k = 0; k < nodes[i].outlnks.size(); ++k) 
-                flows[nodes[i].outlnks[k]] = node_throughput * nodes[i].outwgs[k];
+            {
+                std::size_t link_idx = nodes[i].outlnks[k];
+                double w = nodes[i].outwgs[k];
+                flows[link_idx] = node_throughput * w;
+            }
         }
         total_inlet_flow = Q_total;
+        std::cout << "  -> Flows calculated from splitting fractions." << std::endl;
 
-        // 2. Compute topological distances
-        // dist_to_inlet is already computed in Graph if called properly, but we ensure it
-        compute_distances_from_inlet();
-        compute_distances_to_outlet();
-        
-        
-        // 3. Assign Topological Pressures
-        double delta_P = P_in - P_out;
 
-        for(std::size_t i = 0; i < nodes.size(); ++i) 
+        // SECONDLY: CALCULATE PRESSURES (P) VIA LAPLACIAN 
+        // We solve the linear system assuming homogeneous conductance (g=1).
+        // This is equivalent to finding the "electric potential" in a resistor network
+        // where all resistors are 1 Ohm. It creates a smooth, monotonic field.
+
+        std::size_t N = nodes.size();
+        Eigen::SparseMatrix<double> A(N, N);
+        Eigen::VectorXd b(N);
+        b.setZero();
+        std::vector<Eigen::Triplet<double>> triplets;
+
+        // Dummy conductance for the Laplacian solver
+        double g_unity = 1.0; 
+
+        for(std::size_t i = 0; i < N; ++i) 
         {
             if(nodes[i].is_boundary) 
             {
-                if(nodes[i].dist_to_inlet == 0) pressures[i] = P_in;
-                else pressures[i] = P_out; 
-                continue;
+                // Dirichlet condition
+                triplets.push_back(Eigen::Triplet<double>(i, i, 1.0));
+                
+                // Assign boundary pressure
+                // We assume inlet nodes are at dist=0 (check 'dist_to_inlet' or 'inlet' vector)
+                bool is_inlet = false;
+                for(auto id : inlet) if(id == i) is_inlet = true;
+                
+                if(is_inlet) b(i) = P_in;
+                else b(i) = P_out;
             }
-
-            double d_in = static_cast<double>(nodes[i].dist_to_inlet);
-            double d_out = static_cast<double>(nodes[i].dist_to_outlet);
-
-            if(d_in >= 0 && d_out >= 0) 
+            else 
             {
-                double fraction = d_in / (d_in + d_out);
-                pressures[i] = P_in - (fraction * delta_P);
-            } 
-            else pressures[i] = P_out; // Dead end
+                // Internal nodes: Kirchhof law with g=1
+                // sum(P_neighbor - P_i) = 0  =>  sum(P_neighbor) - degree * P_i = 0
+                double sum_g = 0.0;
+
+                auto add_connection = [&](std::size_t nbr_idx) 
+                {
+                    triplets.push_back(Eigen::Triplet<double>(i, nbr_idx, -g_unity));
+                    sum_g += g_unity;
+                };
+
+                // Incoming neighbors
+                for(std::size_t nbr : nodes[i].innbrs) add_connection(nbr);
+                // Outgoing neighbors
+                for(std::size_t nbr : nodes[i].outnbrs) add_connection(nbr);
+
+                triplets.push_back(Eigen::Triplet<double>(i, i, sum_g));
+            }
         }
 
-        // 4. Solve for k
+        // Solve system
+        A.setFromTriplets(triplets.begin(), triplets.end());
+        Eigen::SparseLU<Eigen::SparseMatrix<double>> solver;
+        solver.compute(A);
+        if(solver.info() != Eigen::Success) 
+        {
+            std::cerr << "Error: Laplacian decomposition failed." << std::endl; exit(1);
+        }
+        Eigen::VectorXd x_p = solver.solve(b);
+        if(solver.info() != Eigen::Success) 
+        {
+            std::cerr << "Error: Laplacian solver failed." << std::endl; exit(1);
+        }
+
+        // Update pressures
+        for(std::size_t i = 0; i < N; ++i) pressures[i] = x_p(i);
+        
+        // Update delta P cache
+        update_pressure_drops();
+        std::cout << "  -> Pressures interpolated using Laplacian (harmonic) field." << std::endl;
+
+
+        // FINALLY: SOLVE INVERSE PROBLEM (FIND G)
+        // g = Q_weights / dP_laplacian
+        
+        double min_g_cutoff = 1e-25; // Floor for conductance
+        double max_g_clamp = 1e-3;   // Ceiling (safety)
+
         for(std::size_t l = 0; l < links.size(); ++l) 
         {
-            std::size_t u = links[l].in;
-            std::size_t v = links[l].out;
-            double dP = pressures[u] - pressures[v];
-            double q = flows[l];
+            double q = std::abs(flows[l]);
+            double dP = std::abs(pressure_drops[l]); // Should be > 0 mostly, thanks to Laplacian
 
-            if(std::abs(dP) > 1e-20) 
-                geometric_conductances[l] = (std::abs(q) * viscosity) / std::abs(dP);
+            if(dP > 1e-15) 
+            {
+                double g = (q * viscosity) / dP;
+                
+                // Safety clamps
+                if(g > max_g_clamp) g = max_g_clamp;
+                if(g < min_g_cutoff) g = 0.0;
+                
+                geometric_conductances[l] = g;
+            }
             else 
-                geometric_conductances[l] = (q < 1e-20) ? 0.0 : 1e6; // Infinite conductance approximation
+            {
+                // Zero pressure drop (very rare in Laplacian field unless disconnected)
+                geometric_conductances[l] = (q > 1e-20) ? max_g_clamp : 0.0;
+            }
         }
         
-        std::cout << "Permeabilities estimated via Topological MaxEnt." << std::endl;
+        std::cout << "Topological permeabilities calibrated." << std::endl;
 
-        // Automatically calculate effective widths from these new geometric conductances
-        // Defaulting to Poiseuille model for the inverse width as it is cleaner
-        calculate_widths_from_geometric_conductances(ModelType::Poiseuille);
+        // Auto-calculate effective widths
+        //calculate_halfwidths_from_geometric_conductances(ModelType::Poiseuille);
     }
 };
 
